@@ -1,12 +1,12 @@
 import { ChildProcess, execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const BINARY_BASE64_PREFIX = "__binary_base64__:";
+const DEV_WORKSPACES_ROOT = "/var/shopify-mobile/dev-workspaces";
 
 export type DevSessionStatus = "starting" | "ready" | "failed" | "stopped";
 
@@ -66,6 +66,7 @@ interface DevSessionInternal {
     logs: string[];
     expoProcess?: ChildProcess;
     webWarmupStatus?: "running" | "completed" | "failed";
+    stopRequested?: boolean;
 }
 
 const sessions = new Map<string, DevSessionInternal>();
@@ -89,8 +90,7 @@ function redactSecrets(value: string): string {
 }
 
 function getWorkspacesRoot(): string {
-    return process.env.SHOPIFY_MOBILE_DEV_WORKSPACES_DIR?.trim() ||
-        path.join(os.tmpdir(), "shopify-mobile-dev-workspaces");
+    return DEV_WORKSPACES_ROOT;
 }
 
 function appendLog(session: DevSessionInternal, line: string) {
@@ -113,6 +113,10 @@ function logSessionEvent(session: DevSessionInternal, message: string) {
 
 function updateSession(session: DevSessionInternal, patch: Partial<DevSessionInternal>) {
     Object.assign(session, patch, { updatedAt: nowIso() });
+}
+
+function isStopRequested(session: DevSessionInternal): boolean {
+    return session.stopRequested === true || session.status === "stopped";
 }
 
 function toPublicSession(session: DevSessionInternal, logLines: number): DevSessionPublic {
@@ -523,6 +527,12 @@ async function bootstrapSession(session: DevSessionInternal, input: StartDevSess
         { timeoutMs },
     );
 
+    if (isStopRequested(session)) {
+        appendLog(session, "Stop requested during bootstrap. Aborting before Expo launch.");
+        logSessionEvent(session, "bootstrap aborted after clone due to stop request");
+        return;
+    }
+
     const installCommand = await detectInstallCommand(session.repoPath);
     updateSession(session, {
         packageManager: installCommand.packageManager,
@@ -537,6 +547,12 @@ async function bootstrapSession(session: DevSessionInternal, input: StartDevSess
         });
     }
 
+    if (isStopRequested(session)) {
+        appendLog(session, "Stop requested during bootstrap. Aborting before Expo launch.");
+        logSessionEvent(session, "bootstrap aborted after install due to stop request");
+        return;
+    }
+
     logSessionEvent(session, `dependencies installed with ${installCommand.command}`);
 
     let shouldUseTunnel = input.useTunnel !== false;
@@ -548,6 +564,12 @@ async function bootstrapSession(session: DevSessionInternal, input: StartDevSess
         }
     }
 
+    if (isStopRequested(session)) {
+        appendLog(session, "Stop requested during bootstrap. Aborting before Expo launch.");
+        logSessionEvent(session, "bootstrap aborted before Expo spawn due to stop request");
+        return;
+    }
+
     const expoArgs = getExpoStartArgs(shouldUseTunnel);
     appendLog(session, `$ npx ${expoArgs.join(" ")}`);
 
@@ -557,6 +579,7 @@ async function bootstrapSession(session: DevSessionInternal, input: StartDevSess
             ...process.env,
             NODE_ENV: "development",
         },
+        detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -571,6 +594,10 @@ async function bootstrapSession(session: DevSessionInternal, input: StartDevSess
     child.on("exit", (code, signal) => {
         const active = sessions.get(session.id);
         if (!active) return;
+
+        updateSession(active, {
+            expoProcess: undefined,
+        });
 
         if (active.status === "stopped") {
             appendLog(active, `Expo process exited after stop (code=${code}, signal=${signal}).`);
@@ -618,15 +645,32 @@ async function writeFilesToRepo(repoPath: string, files: Record<string, string>)
 
 async function stopExpoProcess(session: DevSessionInternal) {
     const processRef = session.expoProcess;
-    if (!processRef || processRef.killed) return;
+    if (!processRef) return;
 
-    processRef.kill("SIGTERM");
+    const killProcess = (signal: NodeJS.Signals) => {
+        const pid = processRef.pid;
+
+        if (process.platform !== "win32" && typeof pid === "number") {
+            try {
+                process.kill(-pid, signal);
+                return;
+            } catch {
+                // Fall back to direct child kill below.
+            }
+        }
+
+        try {
+            processRef.kill(signal);
+        } catch {
+            // Ignore if process already exited.
+        }
+    };
+
+    killProcess("SIGTERM");
 
     await new Promise<void>((resolve) => {
         const timeout = setTimeout(() => {
-            if (!processRef.killed) {
-                processRef.kill("SIGKILL");
-            }
+            killProcess("SIGKILL");
             resolve();
         }, 5000);
 
@@ -641,11 +685,16 @@ async function stopAllActiveSessions(reason: string) {
     const activeSessions = [...sessions.values()].filter((session) => isActiveSessionStatus(session.status));
 
     for (const session of activeSessions) {
+        updateSession(session, {
+            stopRequested: true,
+        });
         await stopExpoProcess(session);
         updateSession(session, {
             status: "stopped",
             error: undefined,
             expoProcess: undefined,
+            expoUrl: undefined,
+            webUrl: undefined,
         });
         appendLog(session, `Dev session stopped automatically: ${reason}`);
         logSessionEvent(session, `auto-stopped reason=${reason}`);
@@ -724,6 +773,7 @@ export async function startDevSession(input: StartDevSessionInput): Promise<DevS
         packageManager: "unknown",
         installCommand: "pending",
         logs: [],
+        stopRequested: false,
     };
 
     sessions.set(id, session);
@@ -754,11 +804,17 @@ export async function stopDevSession(sessionId: string): Promise<DevSessionPubli
     const session = sessions.get(sessionId);
     if (!session) return null;
 
+    updateSession(session, {
+        stopRequested: true,
+    });
+
     await stopExpoProcess(session);
     updateSession(session, {
         status: "stopped",
         error: undefined,
         expoProcess: undefined,
+        expoUrl: undefined,
+        webUrl: undefined,
     });
     appendLog(session, "Dev session stopped.");
     logSessionEvent(session, "stopped by API request");

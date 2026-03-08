@@ -20,7 +20,8 @@ app.use((req, res, next) => {
     const shouldLog =
         req.originalUrl.startsWith("/api/shopify-mobile/dev-session") ||
         req.originalUrl.startsWith("/api/shopify-mobile/scaffold-expo") ||
-        req.originalUrl.startsWith("/api/shopify-mobile/generate-preview");
+        req.originalUrl.startsWith("/api/shopify-mobile/generate-preview") ||
+        req.originalUrl.startsWith("/api/shopify-mobile/opencode/prompt");
 
     if (!shouldLog) {
         next();

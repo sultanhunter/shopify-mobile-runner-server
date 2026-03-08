@@ -15,7 +15,6 @@ WORKDIR /app
 COPY package*.json ./
 
 # Copy TypeScript config and source code
-COPY package*.json ./
 COPY tsconfig.json ./
 COPY src ./src
 
@@ -23,8 +22,8 @@ COPY src ./src
 RUN npm ci
 RUN npm run build
 
-# Install ngrok once (expo tunnel)
-RUN npm install -g @expo/ngrok@^4.1.0
+# Install global runner tools
+RUN npm install -g @expo/ngrok@^4.1.0 opencode-ai
 
 # Expose port
 EXPOSE 8080
