@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const BINARY_BASE64_PREFIX = "__binary_base64__:";
 const DEV_WORKSPACES_ROOT = "/var/shopify-mobile/dev-workspaces";
+const LEGACY_DEV_WORKSPACES_ROOT = "/tmp/shopify-mobile-dev-workspaces";
+const EXPO_DEFAULT_PORT = 8081;
 
 export type DevSessionStatus = "starting" | "ready" | "failed" | "stopped";
 
@@ -261,6 +263,102 @@ async function runExec(session: DevSessionInternal, command: string, args: strin
     }
 }
 
+function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isProcessAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+async function listListeningPidsOnPort(port: number): Promise<number[]> {
+    try {
+        const result = await execFileAsync("lsof", ["-nP", "-ti", `tcp:${String(port)}`], {
+            timeout: 15000,
+            maxBuffer: 5 * 1024 * 1024,
+        });
+
+        return result.stdout
+            .split(/\r?\n/)
+            .map((line) => Number(line.trim()))
+            .filter((pid) => Number.isInteger(pid) && pid > 0);
+    } catch {
+        return [];
+    }
+}
+
+async function readProcessCommand(pid: number): Promise<string> {
+    try {
+        const result = await execFileAsync("ps", ["-o", "command=", "-p", String(pid)], {
+            timeout: 10000,
+            maxBuffer: 2 * 1024 * 1024,
+        });
+
+        return result.stdout.trim();
+    } catch {
+        return "";
+    }
+}
+
+function isManagedExpoCommand(command: string): boolean {
+    const normalized = command.toLowerCase();
+    const looksLikeExpo = normalized.includes(" expo ") || normalized.includes("npx expo") || normalized.includes("@expo");
+    const inKnownWorkspace =
+        normalized.includes(DEV_WORKSPACES_ROOT.toLowerCase()) ||
+        normalized.includes(LEGACY_DEV_WORKSPACES_ROOT.toLowerCase());
+
+    return looksLikeExpo && inKnownWorkspace;
+}
+
+async function terminateExternalProcess(pid: number): Promise<void> {
+    const killWithFallback = (signal: NodeJS.Signals) => {
+        if (process.platform !== "win32") {
+            try {
+                process.kill(-pid, signal);
+                return;
+            } catch {
+                // Fall through to direct kill.
+            }
+        }
+
+        try {
+            process.kill(pid, signal);
+        } catch {
+            // Process may have exited already.
+        }
+    };
+
+    killWithFallback("SIGTERM");
+    await delay(1800);
+
+    if (isProcessAlive(pid)) {
+        killWithFallback("SIGKILL");
+    }
+}
+
+async function cleanupResidualExpoProcesses(session: DevSessionInternal): Promise<void> {
+    const pids = await listListeningPidsOnPort(EXPO_DEFAULT_PORT);
+    if (pids.length === 0) {
+        return;
+    }
+
+    for (const pid of pids) {
+        const command = await readProcessCommand(pid);
+        if (!isManagedExpoCommand(command)) {
+            appendLog(session, `Port ${EXPO_DEFAULT_PORT} in use by pid=${pid}; not a managed Expo process.`);
+            continue;
+        }
+
+        appendLog(session, `Stopping stale Expo process pid=${pid} on port ${EXPO_DEFAULT_PORT}.`);
+        await terminateExternalProcess(pid);
+    }
+}
+
 function extractExpoUrl(line: string): string | undefined {
     const exp = line.match(/(exp:\/\/[\w\-./?=&%:+]+)/);
     if (exp?.[1]) return exp[1];
@@ -467,7 +565,7 @@ function listenStream(session: DevSessionInternal, stream: NodeJS.ReadableStream
 }
 
 function getExpoStartArgs(useTunnel: boolean): string[] {
-    const args = ["expo", "start"];
+    const args = ["expo", "start", "--port", String(EXPO_DEFAULT_PORT)];
     if (useTunnel) {
         args.push("--tunnel");
     }
@@ -519,6 +617,7 @@ async function bootstrapSession(session: DevSessionInternal, input: StartDevSess
     const timeoutMs = Number(process.env.SHOPIFY_MOBILE_DEV_TIMEOUT_MS ?? "900000");
 
     await mkdir(session.workspacePath, { recursive: true });
+    await cleanupResidualExpoProcesses(session);
 
     await runExec(
         session,
