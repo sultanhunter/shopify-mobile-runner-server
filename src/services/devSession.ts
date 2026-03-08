@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const BINARY_BASE64_PREFIX = "__binary_base64__:";
 const DEV_WORKSPACES_ROOT = "/var/shopify-mobile/dev-workspaces";
+const SHARED_PROJECTS_ROOT = "/var/shopify-mobile/projects";
 const LEGACY_DEV_WORKSPACES_ROOT = "/tmp/shopify-mobile-dev-workspaces";
 const EXPO_DEFAULT_PORT = 8081;
 
@@ -21,7 +22,7 @@ export interface StartDevSessionInput {
 }
 
 export interface ApplyAndPushInput {
-    files: Record<string, string>;
+    files?: Record<string, string>;
     commitMessage?: string;
     runInstall?: boolean;
 }
@@ -97,6 +98,11 @@ function redactSecrets(value: string): string {
 
 function getWorkspacesRoot(): string {
     return DEV_WORKSPACES_ROOT;
+}
+
+function sanitizeProjectId(value: string): string {
+    const cleaned = value.trim().replace(/[^a-zA-Z0-9_-]+/g, "-");
+    return cleaned.length > 0 ? cleaned.slice(0, 120) : "project";
 }
 
 function appendLog(session: DevSessionInternal, line: string) {
@@ -265,6 +271,49 @@ async function runExec(session: DevSessionInternal, command: string, args: strin
 
         throw error;
     }
+}
+
+async function ensureRepoForDevSession(
+    session: DevSessionInternal,
+    input: StartDevSessionInput,
+    timeoutMs: number,
+): Promise<void> {
+    await mkdir(session.workspacePath, { recursive: true });
+
+    const gitDir = path.join(session.repoPath, ".git");
+    if (!(await pathExists(gitDir))) {
+        const cloneRepoUrl = withGithubToken(input.repoUrl);
+        await runExec(
+            session,
+            "git",
+            ["clone", "--single-branch", "--branch", session.branch, cloneRepoUrl, session.repoPath],
+            { timeoutMs },
+        );
+        return;
+    }
+
+    const status = await runExec(session, "git", ["status", "--porcelain"], {
+        cwd: session.repoPath,
+        timeoutMs: 30000,
+    });
+
+    if (status.stdout.trim()) {
+        appendLog(session, "Reusing existing repo with local changes; skipping pull.");
+        return;
+    }
+
+    await runExec(session, "git", ["fetch", "origin", session.branch], {
+        cwd: session.repoPath,
+        timeoutMs: 180000,
+    });
+    await runExec(session, "git", ["checkout", session.branch], {
+        cwd: session.repoPath,
+        timeoutMs: 30000,
+    });
+    await runExec(session, "git", ["pull", "--ff-only", "origin", session.branch], {
+        cwd: session.repoPath,
+        timeoutMs: 180000,
+    });
 }
 
 function delay(ms: number): Promise<void> {
@@ -640,22 +689,14 @@ async function ensureNgrokAvailable(session: DevSessionInternal): Promise<boolea
 }
 
 async function bootstrapSession(session: DevSessionInternal, input: StartDevSessionInput) {
-    const cloneRepoUrl = withGithubToken(input.repoUrl);
     const timeoutMs = Number(process.env.SHOPIFY_MOBILE_DEV_TIMEOUT_MS ?? "900000");
 
-    await mkdir(session.workspacePath, { recursive: true });
     await cleanupResidualExpoProcesses(session);
-
-    await runExec(
-        session,
-        "git",
-        ["clone", "--single-branch", "--branch", session.branch, cloneRepoUrl, session.repoPath],
-        { timeoutMs },
-    );
+    await ensureRepoForDevSession(session, input, timeoutMs);
 
     if (isStopRequested(session)) {
         appendLog(session, "Stop requested during bootstrap. Aborting before Expo launch.");
-        logSessionEvent(session, "bootstrap aborted after clone due to stop request");
+        logSessionEvent(session, "bootstrap aborted after repo sync due to stop request");
         return;
     }
 
@@ -885,7 +926,7 @@ export async function startDevSession(input: StartDevSessionInput): Promise<DevS
     const createdAt = nowIso();
     const id = randomUUID();
     const branch = input.branch?.trim() || "main";
-    const workspacePath = path.join(getWorkspacesRoot(), id);
+    const workspacePath = path.join(SHARED_PROJECTS_ROOT, sanitizeProjectId(input.projectId));
     const repoPath = path.join(workspacePath, "repo");
 
     const session: DevSessionInternal = {
@@ -967,18 +1008,15 @@ export async function applyAndPushDevSessionChanges(
         throw new Error("Dev session not found.");
     }
 
-    if (!input.files || Object.keys(input.files).length === 0) {
-        throw new Error("No files provided to apply.");
+    const fileCount = input.files ? Object.keys(input.files).length : 0;
+    logSessionEvent(session, `commit started files=${fileCount}`);
+
+    if (input.files && fileCount > 0) {
+        await writeFilesToRepo(session.repoPath, input.files);
+        appendLog(session, `Applied ${fileCount} file update(s) to local repo.`);
+    } else {
+        appendLog(session, "Preparing commit from existing AI workspace changes.");
     }
-
-    logSessionEvent(session, `apply-and-push started files=${Object.keys(input.files).length}`);
-
-    if (session.status === "failed") {
-        throw new Error("Dev session is in failed state. Restart it before applying changes.");
-    }
-
-    await writeFilesToRepo(session.repoPath, input.files);
-    appendLog(session, `Applied ${Object.keys(input.files).length} file update(s) to local repo.`);
 
     if (input.runInstall) {
         const installCommand = await detectInstallCommand(session.repoPath);
@@ -988,19 +1026,19 @@ export async function applyAndPushDevSessionChanges(
         });
     }
 
-    await runExec(session, "git", ["add", "."], { cwd: session.repoPath });
+    await runExec(session, "git", ["add", "-A"], { cwd: session.repoPath });
     const gitStatus = await runExec(session, "git", ["status", "--porcelain"], { cwd: session.repoPath });
 
     if (!gitStatus.stdout.trim()) {
-        appendLog(session, "No git changes detected after apply step.");
-        logSessionEvent(session, "apply-and-push detected no changes");
+        appendLog(session, "No git changes detected to commit.");
+        logSessionEvent(session, "commit detected no changes");
         return {
             session: toPublicSession(session, 200),
             committed: false,
         };
     }
 
-    const commitMessage = input.commitMessage?.trim() || "chore: apply AI-generated project updates";
+    const commitMessage = input.commitMessage?.trim() || "chore: commit AI workspace updates";
     await runExec(session, "git", ["commit", "-m", commitMessage], {
         cwd: session.repoPath,
         env: gitIdentityEnv(),
@@ -1016,7 +1054,7 @@ export async function applyAndPushDevSessionChanges(
 
     const commitSha = head.stdout.trim();
     appendLog(session, `Changes committed and pushed at ${commitSha}.`);
-    logSessionEvent(session, `apply-and-push completed commit=${commitSha}`);
+    logSessionEvent(session, `commit completed commit=${commitSha}`);
 
     return {
         session: toPublicSession(session, 200),

@@ -131,10 +131,6 @@ router.post("/shopify-mobile/dev-session/:sessionId/apply-and-push", async (req:
     const commitMessage = asNonEmptyString(body.commitMessage) ?? undefined;
     const runInstall = asBoolean(body.runInstall, false);
 
-    if (!files || typeof files !== "object" || Object.keys(files).length === 0) {
-        return res.status(400).json({ error: "files map is required." });
-    }
-
     try {
         const result = await applyAndPushDevSessionChanges(req.params.sessionId, {
             files,
@@ -145,7 +141,7 @@ router.post("/shopify-mobile/dev-session/:sessionId/apply-and-push", async (req:
         return res.json(result);
     } catch (error) {
         return res.status(500).json({
-            error: error instanceof Error ? error.message : "Failed to apply and push changes.",
+            error: error instanceof Error ? error.message : "Failed to commit and push changes.",
         });
     }
 });
