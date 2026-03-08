@@ -171,7 +171,17 @@ async function ensureRepo(input: {
             workspacePath,
             600000,
         );
+        return { workspacePath, repoPath };
     }
+
+    const status = await runCommand("git", ["status", "--porcelain"], repoPath, 30000);
+    if (status.stdout.trim()) {
+        return { workspacePath, repoPath };
+    }
+
+    await runCommand("git", ["fetch", "origin", input.branch], repoPath, 180000).catch(() => null);
+    await runCommand("git", ["checkout", input.branch], repoPath, 30000).catch(() => null);
+    await runCommand("git", ["pull", "--ff-only", "origin", input.branch], repoPath, 180000).catch(() => null);
 
     return { workspacePath, repoPath };
 }

@@ -69,12 +69,16 @@ interface DevSessionInternal {
     expoProcess?: ChildProcess;
     webWarmupStatus?: "running" | "completed" | "failed";
     stopRequested?: boolean;
+    expoUrlBackfillInFlight?: boolean;
+    expoUrlBackfillAttempts?: number;
 }
 
 const sessions = new Map<string, DevSessionInternal>();
 const DEFAULT_LOG_LIMIT = Number(process.env.SHOPIFY_MOBILE_DEV_LOG_LIMIT ?? "500");
 const LOG_ERRORS_TO_STDOUT = (process.env.SHOPIFY_MOBILE_VERBOSE_LOGS ?? "true").toLowerCase() !== "false";
 const ENABLE_WEB_WARMUP = (process.env.SHOPIFY_MOBILE_WEB_WARMUP ?? "false").toLowerCase() === "true";
+const EXPO_URL_BACKFILL_INTERVAL_MS = 2000;
+const EXPO_URL_BACKFILL_MAX_ATTEMPTS = 30;
 
 function nowIso(): string {
     return new Date().toISOString();
@@ -349,12 +353,8 @@ async function cleanupResidualExpoProcesses(session: DevSessionInternal): Promis
 
     for (const pid of pids) {
         const command = await readProcessCommand(pid);
-        if (!isManagedExpoCommand(command)) {
-            appendLog(session, `Port ${EXPO_DEFAULT_PORT} in use by pid=${pid}; not a managed Expo process.`);
-            continue;
-        }
-
-        appendLog(session, `Stopping stale Expo process pid=${pid} on port ${EXPO_DEFAULT_PORT}.`);
+        const label = isManagedExpoCommand(command) ? "managed Expo process" : "process";
+        appendLog(session, `Stopping stale ${label} pid=${pid} on port ${EXPO_DEFAULT_PORT}.`);
         await terminateExternalProcess(pid);
     }
 }
@@ -443,13 +443,40 @@ async function tryResolveExpoUrlFromNgrokApi(session: DevSessionInternal): Promi
 }
 
 function triggerExpoUrlBackfill(session: DevSessionInternal) {
-    if (session.expoUrl) {
+    if (session.expoUrl || session.stopRequested || session.status === "stopped" || session.status === "failed") {
         return;
     }
 
+    if (session.expoUrlBackfillInFlight) {
+        return;
+    }
+
+    session.expoUrlBackfillInFlight = true;
+    session.expoUrlBackfillAttempts = (session.expoUrlBackfillAttempts ?? 0) + 1;
+    const currentAttempt = session.expoUrlBackfillAttempts;
+
     void (async () => {
         const resolved = await tryResolveExpoUrlFromNgrokApi(session);
+        session.expoUrlBackfillInFlight = false;
+
         if (!resolved || session.expoUrl) {
+            if (
+                !session.expoUrl &&
+                !session.stopRequested &&
+                session.status !== "stopped" &&
+                session.status !== "failed" &&
+                currentAttempt < EXPO_URL_BACKFILL_MAX_ATTEMPTS
+            ) {
+                if (currentAttempt === 1 || currentAttempt % 5 === 0) {
+                    appendLog(session, `Waiting for tunnel URL (attempt ${currentAttempt}/${EXPO_URL_BACKFILL_MAX_ATTEMPTS})...`);
+                }
+
+                setTimeout(() => triggerExpoUrlBackfill(session), EXPO_URL_BACKFILL_INTERVAL_MS);
+            }
+
+            if (currentAttempt >= EXPO_URL_BACKFILL_MAX_ATTEMPTS && !session.expoUrl) {
+                appendLog(session, "Could not resolve Expo tunnel URL automatically.");
+            }
             return;
         }
 
@@ -475,7 +502,7 @@ function tryMarkReadyFromLine(session: DevSessionInternal, line: string) {
         appendLog(session, "Dev session is ready.");
         logSessionEvent(session, `ready expoUrl=${session.expoUrl ?? "n/a"} webUrl=${session.webUrl ?? "n/a"}`);
 
-        if (!session.expoUrl && line.toLowerCase().includes("tunnel")) {
+        if (!session.expoUrl) {
             triggerExpoUrlBackfill(session);
         }
 
@@ -794,6 +821,8 @@ async function stopAllActiveSessions(reason: string) {
             expoProcess: undefined,
             expoUrl: undefined,
             webUrl: undefined,
+            expoUrlBackfillInFlight: false,
+            expoUrlBackfillAttempts: 0,
         });
         appendLog(session, `Dev session stopped automatically: ${reason}`);
         logSessionEvent(session, `auto-stopped reason=${reason}`);
@@ -873,6 +902,8 @@ export async function startDevSession(input: StartDevSessionInput): Promise<DevS
         installCommand: "pending",
         logs: [],
         stopRequested: false,
+        expoUrlBackfillInFlight: false,
+        expoUrlBackfillAttempts: 0,
     };
 
     sessions.set(id, session);
@@ -914,6 +945,8 @@ export async function stopDevSession(sessionId: string): Promise<DevSessionPubli
         expoProcess: undefined,
         expoUrl: undefined,
         webUrl: undefined,
+        expoUrlBackfillInFlight: false,
+        expoUrlBackfillAttempts: 0,
     });
     appendLog(session, "Dev session stopped.");
     logSessionEvent(session, "stopped by API request");
