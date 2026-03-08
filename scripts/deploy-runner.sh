@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BRANCH="${1:-main}"
-PM2_PROCESS="${PM2_PROCESS:-shopify-mobile-runner-server}"
+PM2_PROCESS="${PM2_PROCESS:-shopify-runner}"
 
 log() {
   printf "\n[deploy] %s\n" "$1"
