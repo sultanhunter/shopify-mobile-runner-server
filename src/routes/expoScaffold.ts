@@ -1,5 +1,6 @@
 import { Request, Response, Router } from "express";
-import { generateExpoSdk55Scaffold } from "../services/expoScaffold.js";
+import { generateExpoScaffold } from "../services/expoScaffold.js";
+import { getDefaultExpoSdk, listSupportedExpoVersions } from "../services/expoSupportMatrix.js";
 
 function asNonEmptyString(value: unknown): string | null {
     return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
@@ -24,18 +25,26 @@ router.post("/shopify-mobile/scaffold-expo", async (req: Request, res: Response)
     }
 
     const projectName = asNonEmptyString(req.body?.projectName);
+    const requestedSdk = asNonEmptyString(req.body?.sdk) ?? getDefaultExpoSdk();
     if (!projectName) {
         return res.status(400).json({ error: "projectName is required." });
     }
 
     try {
-        const scaffold = await generateExpoSdk55Scaffold(projectName);
+        const scaffold = await generateExpoScaffold(projectName, requestedSdk);
         return res.json(scaffold);
     } catch (error) {
         return res.status(500).json({
             error: error instanceof Error ? error.message : "Failed to generate Expo scaffold.",
         });
     }
+});
+
+router.get("/shopify-mobile/scaffold-expo/versions", async (_req: Request, res: Response) => {
+    return res.json({
+        defaultSdk: getDefaultExpoSdk(),
+        supported: listSupportedExpoVersions(),
+    });
 });
 
 export default router;

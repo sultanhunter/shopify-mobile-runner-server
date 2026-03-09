@@ -5,6 +5,7 @@ Standalone runner backend for the Shopify Mobile AI MVP.
 ## Included APIs
 
 - `POST /api/shopify-mobile/scaffold-expo` - Generate Expo scaffold (`create-expo-app`)
+- `GET /api/shopify-mobile/scaffold-expo/versions` - List supported Expo SDK matrix
 - `POST /api/shopify-mobile/generate-preview` - Vertex/Gemini preview update generation
 - `POST /api/shopify-mobile/opencode/prompt` - Run OpenCode Shopify agent in persistent repo workspace
 - `POST /api/shopify-mobile/opencode/prompt/stream` - Stream OpenCode events + final result
@@ -37,3 +38,10 @@ Standalone runner backend for the Shopify Mobile AI MVP.
 - Runner creates/updates `.opencode/agents/shopify-app-builder.md` inside each project repo.
 - First prompt creates an OpenCode session in the persistent repo workspace.
 - Consecutive prompts reuse the same OpenCode session ID for that project.
+
+## Expo SDK Support Matrix
+
+- Expo scaffold generation is pinned by SDK support data in `src/services/expoSupportMatrix.ts`.
+- Default SDK is currently `sdk-55`.
+- `POST /api/shopify-mobile/scaffold-expo` accepts optional body field `sdk` (example: `"55"` or `"sdk-55"`).
+- Update support matrix entries when adding/removing SDK support, including associated package compatibility.

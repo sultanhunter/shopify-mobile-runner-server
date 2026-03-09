@@ -3,6 +3,7 @@ import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { getDefaultExpoSdk, resolveExpoSupportVersion } from "./expoSupportMatrix.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -90,10 +91,12 @@ async function readScaffoldFilesRecursively(
     }
 }
 
-export async function generateExpoSdk55Scaffold(projectName: string): Promise<{
+export async function generateExpoScaffold(projectName: string, sdk = getDefaultExpoSdk()): Promise<{
+    sdk: string;
     files: Record<string, string>;
     warnings: string[];
 }> {
+    const support = resolveExpoSupportVersion(sdk);
     const timeoutMs = Number(process.env.EXPO_SCAFFOLD_TIMEOUT_MS ?? "300000");
     const tmpParent = await mkdtemp(path.join(os.tmpdir(), "shopify-mobile-expo-"));
     const slug = toSlug(projectName);
@@ -105,10 +108,10 @@ export async function generateExpoSdk55Scaffold(projectName: string): Promise<{
         await execFileAsync(
             "npx",
             [
-                "create-expo-app@latest",
+                `create-expo-app@${support.createExpoAppVersion}`,
                 targetDir,
                 "--template",
-                "default",
+                support.templateSpecifier,
                 "--yes",
                 "--no-install",
             ],
@@ -126,8 +129,12 @@ export async function generateExpoSdk55Scaffold(projectName: string): Promise<{
         }
 
         return {
+            sdk: support.sdk,
             files,
-            warnings,
+            warnings: [
+                ...warnings,
+                `Scaffolded with Expo sdk-${support.sdk} (${support.status}).`,
+            ],
         };
     } finally {
         await rm(tmpParent, { recursive: true, force: true });
