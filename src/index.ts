@@ -13,13 +13,25 @@ dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+const ENABLE_REQUEST_LOGS = (process.env.SERVER_REQUEST_LOGS ?? "true").toLowerCase() !== "false";
+const ENABLE_HEARTBEAT_LOGS = (process.env.SERVER_HEARTBEAT_LOGS ?? "false").toLowerCase() === "true";
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 
 app.use((req, res, next) => {
+    if (!ENABLE_REQUEST_LOGS) {
+        next();
+        return;
+    }
+
+    const isDevSessionStatusPoll =
+        req.method === "GET" &&
+        req.originalUrl.startsWith("/api/shopify-mobile/dev-session/") &&
+        req.originalUrl.includes("/status");
+
     const shouldLog =
-        req.originalUrl.startsWith("/api/shopify-mobile/dev-session") ||
+        (req.originalUrl.startsWith("/api/shopify-mobile/dev-session") && !isDevSessionStatusPoll) ||
         req.originalUrl.startsWith("/api/shopify-mobile/scaffold-expo") ||
         req.originalUrl.startsWith("/api/shopify-mobile/generate-preview") ||
         req.originalUrl.startsWith("/api/shopify-mobile/opencode/prompt") ||
@@ -94,13 +106,15 @@ server.on("error", (error) => {
     console.error("[SERVER_ERROR]", error);
 });
 
-setInterval(() => {
-    const memoryUsage = process.memoryUsage();
-    const stats = getDevSessionStats();
-    console.log(
-        `[HEARTBEAT] pid=${process.pid} uptimeSec=${Math.floor(process.uptime())} rssMb=${Math.round(memoryUsage.rss / (1024 * 1024))} heapUsedMb=${Math.round(memoryUsage.heapUsed / (1024 * 1024))} sessions=${stats.total} ready=${stats.byStatus.ready} starting=${stats.byStatus.starting} failed=${stats.byStatus.failed}`,
-    );
-}, Number(process.env.SERVER_HEARTBEAT_MS ?? "30000"));
+if (ENABLE_HEARTBEAT_LOGS) {
+    setInterval(() => {
+        const memoryUsage = process.memoryUsage();
+        const stats = getDevSessionStats();
+        console.log(
+            `[HEARTBEAT] pid=${process.pid} uptimeSec=${Math.floor(process.uptime())} rssMb=${Math.round(memoryUsage.rss / (1024 * 1024))} heapUsedMb=${Math.round(memoryUsage.heapUsed / (1024 * 1024))} sessions=${stats.total} ready=${stats.byStatus.ready} starting=${stats.byStatus.starting} failed=${stats.byStatus.failed}`,
+        );
+    }, Number(process.env.SERVER_HEARTBEAT_MS ?? "30000"));
+}
 
 process.on("unhandledRejection", (reason) => {
     console.error("[UNHANDLED_REJECTION]", reason);

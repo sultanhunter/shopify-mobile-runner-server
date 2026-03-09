@@ -1,14 +1,13 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { generateExpoScaffold } from "./expoScaffold.js";
+import { collectExpoProjectFiles, scaffoldExpoProjectToDirectory } from "./expoScaffold.js";
 import { insertWorkspaceTask, updateWorkspaceTask, upsertProject } from "./supabase.js";
 
 const execFileAsync = promisify(execFile);
-const BINARY_BASE64_PREFIX = "__binary_base64__:";
+const PROJECTS_ROOT = "/var/shopify-mobile/projects";
 
 interface CreateWorkspaceInput {
     name: string;
@@ -136,14 +135,14 @@ async function createGithubRepo(params: {
                 clone_url?: string;
                 default_branch?: string;
             }>(
-            `https://api.github.com/orgs/${encodeURIComponent(params.owner)}/repos`,
-            {
-                method: "POST",
-                headers: githubHeaders(params.token),
-                body: JSON.stringify(body),
-            },
-            "Failed to create GitHub repository for organization.",
-        );
+                `https://api.github.com/orgs/${encodeURIComponent(params.owner)}/repos`,
+                {
+                    method: "POST",
+                    headers: githubHeaders(params.token),
+                    body: JSON.stringify(body),
+                },
+                "Failed to create GitHub repository for organization.",
+            );
         } catch {
             return await githubApi<{
                 owner?: { login?: string };
@@ -151,14 +150,14 @@ async function createGithubRepo(params: {
                 clone_url?: string;
                 default_branch?: string;
             }>(
-            "https://api.github.com/user/repos",
-            {
-                method: "POST",
-                headers: githubHeaders(params.token),
-                body: JSON.stringify(body),
-            },
-            "Failed to create GitHub repository for user.",
-        );
+                "https://api.github.com/user/repos",
+                {
+                    method: "POST",
+                    headers: githubHeaders(params.token),
+                    body: JSON.stringify(body),
+                },
+                "Failed to create GitHub repository for user.",
+            );
         }
     })();
 
@@ -186,31 +185,8 @@ function withGithubToken(repoUrl: string, token: string): string {
     return parsed.toString();
 }
 
-async function writeScaffoldFiles(rootDir: string, files: Record<string, string>): Promise<void> {
-    for (const [relativePath, content] of Object.entries(files)) {
-        const safeRelativePath = path.posix.normalize(relativePath).replace(/^\/+/, "");
-        if (!safeRelativePath || safeRelativePath.startsWith("../")) {
-            continue;
-        }
-
-        const destination = path.join(rootDir, safeRelativePath);
-        if (!destination.startsWith(rootDir)) {
-            continue;
-        }
-
-        await mkdir(path.dirname(destination), { recursive: true });
-
-        if (content.startsWith(BINARY_BASE64_PREFIX)) {
-            const encoded = content.slice(BINARY_BASE64_PREFIX.length);
-            await writeFile(destination, Buffer.from(encoded, "base64"));
-        } else {
-            await writeFile(destination, content, "utf8");
-        }
-    }
-}
-
-async function runGit(command: string, args: string[], cwd: string): Promise<string> {
-    const result = await execFileAsync(command, args, {
+async function runGit(args: string[], cwd: string): Promise<string> {
+    const result = await execFileAsync("git", args, {
         cwd,
         timeout: 300000,
         maxBuffer: 30 * 1024 * 1024,
@@ -226,29 +202,32 @@ async function runGit(command: string, args: string[], cwd: string): Promise<str
     return result.stdout.trim();
 }
 
-async function seedGithubRepository(params: {
-    files: Record<string, string>;
+async function setupAndPushRepository(params: {
+    repoPath: string;
     repoUrl: string;
     token: string;
     branch: string;
 }): Promise<string> {
-    const tmp = await mkdtemp(path.join(os.tmpdir(), "shopify-mobile-seed-"));
+    await runGit(["init"], params.repoPath);
+    await runGit(["checkout", "-B", params.branch], params.repoPath);
+    await runGit(["add", "."], params.repoPath);
 
-    try {
-        await writeScaffoldFiles(tmp, params.files);
-
-        await runGit("git", ["init"], tmp);
-        await runGit("git", ["checkout", "-b", params.branch], tmp);
-        await runGit("git", ["add", "."], tmp);
-        await runGit("git", ["commit", "-m", "chore(ai): initialize Expo app scaffold"], tmp);
-        await runGit("git", ["remote", "add", "origin", withGithubToken(params.repoUrl, params.token)], tmp);
-        await runGit("git", ["push", "-u", "origin", params.branch], tmp);
-        const commitSha = await runGit("git", ["rev-parse", "HEAD"], tmp);
-
-        return commitSha;
-    } finally {
-        await rm(tmp, { recursive: true, force: true });
+    const status = await runGit(["status", "--porcelain"], params.repoPath);
+    if (!status.trim()) {
+        await runGit(["remote", "remove", "origin"], params.repoPath).catch(() => null);
+        await runGit(["remote", "add", "origin", withGithubToken(params.repoUrl, params.token)], params.repoPath);
+        const head = await runGit(["rev-parse", "HEAD"], params.repoPath).catch(() => "");
+        if (head) {
+            return head;
+        }
+        throw new Error("No changes found to commit while initializing repository.");
     }
+
+    await runGit(["commit", "-m", "chore(ai): initialize Expo app scaffold"], params.repoPath);
+    await runGit(["remote", "remove", "origin"], params.repoPath).catch(() => null);
+    await runGit(["remote", "add", "origin", withGithubToken(params.repoUrl, params.token)], params.repoPath);
+    await runGit(["push", "-u", "origin", params.branch], params.repoPath);
+    return runGit(["rev-parse", "HEAD"], params.repoPath);
 }
 
 function initialGithubState(): GithubState {
@@ -259,39 +238,83 @@ function initialGithubState(): GithubState {
 }
 
 async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInput): Promise<void> {
+    console.log(`[TASK ${taskId}] workspace.create queued name=${input.name} sdk=${input.sdk}`);
     await updateWorkspaceTask(taskId, { status: "running", error: null });
+    console.log(`[TASK ${taskId}] status=running`);
 
     const now = new Date().toISOString();
     const projectId = randomUUID();
-    const preview = buildPreview(input.name);
+    const workspacePath = path.join(PROJECTS_ROOT, projectId);
+    const repoPath = path.join(workspacePath, "repo");
 
-    const scaffold = await generateExpoScaffold(input.name, input.sdk);
+    const initialProject = {
+        id: projectId,
+        name: input.name,
+        createdAt: now,
+        updatedAt: now,
+        expoSdk: input.sdk,
+        preview: buildPreview(input.name),
+        files: {},
+        messages: [
+            {
+                id: randomUUID(),
+                role: "system",
+                content: "Project initialized. Creating Expo starter workspace...",
+                createdAt: now,
+            },
+        ],
+        runs: [],
+        github: initialGithubState(),
+    };
 
-    const messages = [
-        {
-            id: randomUUID(),
-            role: "system",
-            content: "Project initialized. This workspace will generate and update an Expo mobile app connected to your Shopify store via backend APIs.",
-            createdAt: now,
-        },
-        {
-            id: randomUUID(),
-            role: "assistant",
-            content: "Ready. Prompt me with mobile app requirements for your Shopify store.",
-            createdAt: now,
-        },
-    ];
+    await upsertProject(initialProject);
+    await updateWorkspaceTask(taskId, { project_id: projectId });
+    console.log(`[TASK ${taskId}] project row inserted id=${projectId}`);
 
-    if (scaffold.warnings.length > 0) {
-        messages.push({
-            id: randomUUID(),
-            role: "assistant",
-            content: `Expo scaffold warnings: ${scaffold.warnings.join(" | ")}`,
-            createdAt: now,
-        });
-    }
+    await mkdir(workspacePath, { recursive: true });
+    const scaffold = await scaffoldExpoProjectToDirectory({
+        projectName: input.name,
+        sdk: input.sdk,
+        targetDir: repoPath,
+    });
+    const collected = await collectExpoProjectFiles(repoPath);
+    console.log(`[TASK ${taskId}] scaffold generated sdk=${scaffold.sdk} files=${Object.keys(collected.files).length}`);
 
-    const github: GithubState = initialGithubState();
+    const updatedAtAfterScaffold = new Date().toISOString();
+    const projectAfterScaffold = {
+        ...initialProject,
+        updatedAt: updatedAtAfterScaffold,
+        expoSdk: scaffold.sdk,
+        files: collected.files,
+        messages: [
+            {
+                id: randomUUID(),
+                role: "system",
+                content: "Project initialized. This workspace now contains a clean Expo starter project.",
+                createdAt: updatedAtAfterScaffold,
+            },
+            {
+                id: randomUUID(),
+                role: "assistant",
+                content: "Ready. Connect your Shopify store to apply baseline commerce features.",
+                createdAt: updatedAtAfterScaffold,
+            },
+            ...(scaffold.warnings.length > 0 || collected.warnings.length > 0
+                ? [
+                      {
+                          id: randomUUID(),
+                          role: "assistant",
+                          content: `Expo scaffold warnings: ${[...scaffold.warnings, ...collected.warnings].join(" | ")}`,
+                          createdAt: updatedAtAfterScaffold,
+                      },
+                  ]
+                : []),
+        ],
+    };
+
+    await upsertProject(projectAfterScaffold);
+
+    const github: GithubState = { ...projectAfterScaffold.github };
     const githubToken = getGithubToken();
 
     if (githubToken) {
@@ -304,8 +327,8 @@ async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInpu
                 projectId,
             });
 
-            const commitSha = await seedGithubRepository({
-                files: scaffold.files,
+            const commitSha = await setupAndPushRepository({
+                repoPath,
                 repoUrl: repo.repoUrl,
                 token: githubToken,
                 branch: repo.defaultBranch,
@@ -320,37 +343,33 @@ async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInpu
             github.lastCommitMessage = "chore(ai): initialize Expo app scaffold";
             github.lastSyncedAt = new Date().toISOString();
             github.error = undefined;
+            console.log(`[TASK ${taskId}] github initialized repo=${repo.owner}/${repo.repo}`);
         } catch (error) {
             github.enabled = false;
             github.error = error instanceof Error ? error.message : "Failed to create GitHub repository.";
+            console.warn(`[TASK ${taskId}] github init failed: ${github.error}`);
         }
     } else {
         github.error = "Set GITHUB_TOKEN to enable automatic repository creation and commits.";
+        console.log(`[TASK ${taskId}] github skipped (token missing)`);
     }
 
-    const project = {
-        id: projectId,
-        name: input.name,
-        createdAt: now,
-        updatedAt: now,
-        expoSdk: scaffold.sdk,
-        preview,
-        files: scaffold.files,
-        messages,
-        runs: [],
+    const finalizedProject = {
+        ...projectAfterScaffold,
+        updatedAt: new Date().toISOString(),
         github,
     };
 
-    await upsertProject(project);
+    await upsertProject(finalizedProject);
     await updateWorkspaceTask(taskId, {
         status: "completed",
-        project_id: projectId,
         result: {
             projectId,
             expoSdk: scaffold.sdk,
         },
         error: null,
     });
+    console.log(`[TASK ${taskId}] status=completed projectId=${projectId}`);
 }
 
 export async function enqueueCreateWorkspaceTask(input: CreateWorkspaceInput): Promise<{
@@ -366,9 +385,11 @@ export async function enqueueCreateWorkspaceTask(input: CreateWorkspaceInput): P
     });
 
     void runCreateWorkspaceTask(task.id, input).catch(async (error) => {
+        const message = error instanceof Error ? error.message : "Workspace task failed.";
+        console.error(`[TASK ${task.id}] status=failed error=${message}`);
         await updateWorkspaceTask(task.id, {
             status: "failed",
-            error: error instanceof Error ? error.message : "Workspace task failed.",
+            error: message,
         }).catch(() => null);
     });
 

@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -91,49 +91,90 @@ async function readScaffoldFilesRecursively(
     }
 }
 
+function getScaffoldTimeoutMs(): number {
+    const timeoutMs = Number(process.env.EXPO_SCAFFOLD_TIMEOUT_MS ?? "300000");
+    return Number.isFinite(timeoutMs) ? timeoutMs : 300000;
+}
+
+async function runCreateExpoApp(targetDir: string, sdk: string): Promise<{ sdk: string; warnings: string[] }> {
+    const support = resolveExpoSupportVersion(sdk);
+    const timeoutMs = getScaffoldTimeoutMs();
+
+    await execFileAsync(
+        "npx",
+        [
+            `create-expo-app@${support.createExpoAppVersion}`,
+            targetDir,
+            "--template",
+            support.templateSpecifier,
+            "--yes",
+            "--no-install",
+        ],
+        {
+            timeout: timeoutMs,
+            maxBuffer: 20 * 1024 * 1024,
+        },
+    );
+
+    return {
+        sdk: support.sdk,
+        warnings: [`Scaffolded with Expo sdk-${support.sdk} (${support.status}).`],
+    };
+}
+
+export async function scaffoldExpoProjectToDirectory(params: {
+    projectName: string;
+    sdk?: string;
+    targetDir: string;
+}): Promise<{ sdk: string; warnings: string[] }> {
+    const sdk = params.sdk ?? getDefaultExpoSdk();
+
+    await mkdir(path.dirname(params.targetDir), { recursive: true });
+
+    try {
+        await stat(params.targetDir);
+        await rm(params.targetDir, { recursive: true, force: true });
+    } catch {
+        // Target does not exist yet.
+    }
+
+    return runCreateExpoApp(params.targetDir, sdk);
+}
+
+export async function collectExpoProjectFiles(targetDir: string): Promise<{
+    files: Record<string, string>;
+    warnings: string[];
+}> {
+    const warnings: string[] = [];
+    const files: Record<string, string> = {};
+    await readScaffoldFilesRecursively(targetDir, targetDir, files, warnings);
+
+    if (Object.keys(files).length === 0) {
+        throw new Error("Scaffold generated zero files.");
+    }
+
+    return { files, warnings };
+}
+
 export async function generateExpoScaffold(projectName: string, sdk = getDefaultExpoSdk()): Promise<{
     sdk: string;
     files: Record<string, string>;
     warnings: string[];
 }> {
-    const support = resolveExpoSupportVersion(sdk);
-    const timeoutMs = Number(process.env.EXPO_SCAFFOLD_TIMEOUT_MS ?? "300000");
     const tmpParent = await mkdtemp(path.join(os.tmpdir(), "shopify-mobile-expo-"));
     const slug = toSlug(projectName);
     const targetDir = path.join(tmpParent, slug);
 
-    const warnings: string[] = [];
-
     try {
-        await execFileAsync(
-            "npx",
-            [
-                `create-expo-app@${support.createExpoAppVersion}`,
-                targetDir,
-                "--template",
-                support.templateSpecifier,
-                "--yes",
-                "--no-install",
-            ],
-            {
-                timeout: Number.isFinite(timeoutMs) ? timeoutMs : 300000,
-                maxBuffer: 20 * 1024 * 1024,
-            },
-        );
-
-        const files: Record<string, string> = {};
-        await readScaffoldFilesRecursively(targetDir, targetDir, files, warnings);
-
-        if (Object.keys(files).length === 0) {
-            throw new Error("Scaffold generated zero text files.");
-        }
+        const scaffoldResult = await runCreateExpoApp(targetDir, sdk);
+        const collected = await collectExpoProjectFiles(targetDir);
 
         return {
-            sdk: support.sdk,
-            files,
+            sdk: scaffoldResult.sdk,
+            files: collected.files,
             warnings: [
-                ...warnings,
-                `Scaffolded with Expo sdk-${support.sdk} (${support.status}).`,
+                ...collected.warnings,
+                ...scaffoldResult.warnings,
             ],
         };
     } finally {

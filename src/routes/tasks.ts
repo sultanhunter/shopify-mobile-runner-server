@@ -53,6 +53,10 @@ router.post("/shopify-mobile/tasks/workspace/create", async (req: Request, res: 
             sdk: resolved.sdk,
         });
 
+        console.log(
+            `[TASK ${task.id}] accepted workspace.create name=${name} requestedSdk=${sdk} resolvedSdk=${resolved.sdk}`,
+        );
+
         return res.status(202).json({ task });
     } catch (error) {
         return res.status(500).json({
