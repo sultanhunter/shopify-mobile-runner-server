@@ -9,6 +9,7 @@ Standalone runner backend for the Shopify Mobile AI MVP.
 - `POST /api/shopify-mobile/generate-preview` - Vertex/Gemini preview update generation
 - `POST /api/shopify-mobile/opencode/prompt` - Run OpenCode Shopify agent in persistent repo workspace
 - `POST /api/shopify-mobile/opencode/prompt/stream` - Stream OpenCode events + final result
+- `POST /api/shopify-mobile/tasks/workspace/create` - Enqueue async workspace creation task
 - `POST /api/shopify-mobile/dev-session/start` - Clone repo, install, start Expo
 - `GET /api/shopify-mobile/dev-session/:sessionId/status` - Session status/logs
 - `POST /api/shopify-mobile/dev-session/:sessionId/stop` - Stop session

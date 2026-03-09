@@ -6,6 +6,7 @@ import express from "express";
 import devSessionRoutes from "./routes/devSession.js";
 import expoScaffoldRoutes from "./routes/expoScaffold.js";
 import shopifyMobileAiRoutes from "./routes/shopifyMobileAi.js";
+import taskRoutes from "./routes/tasks.js";
 import { getDevSessionStats } from "./services/devSession.js";
 
 dotenv.config();
@@ -21,7 +22,8 @@ app.use((req, res, next) => {
         req.originalUrl.startsWith("/api/shopify-mobile/dev-session") ||
         req.originalUrl.startsWith("/api/shopify-mobile/scaffold-expo") ||
         req.originalUrl.startsWith("/api/shopify-mobile/generate-preview") ||
-        req.originalUrl.startsWith("/api/shopify-mobile/opencode/prompt");
+        req.originalUrl.startsWith("/api/shopify-mobile/opencode/prompt") ||
+        req.originalUrl.startsWith("/api/shopify-mobile/tasks/workspace/create");
 
     if (!shouldLog) {
         next();
@@ -64,6 +66,7 @@ app.get("/", (req, res) => {
 app.use("/api", shopifyMobileAiRoutes);
 app.use("/api", expoScaffoldRoutes);
 app.use("/api", devSessionRoutes);
+app.use("/api", taskRoutes);
 
 app.use(
     (
