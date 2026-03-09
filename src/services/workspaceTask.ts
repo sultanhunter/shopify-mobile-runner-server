@@ -254,7 +254,7 @@ async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInpu
         updatedAt: now,
         expoSdk: input.sdk,
         preview: buildPreview(input.name),
-        files: {},
+        fileIndex: [],
         messages: [
             {
                 id: randomUUID(),
@@ -285,7 +285,7 @@ async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInpu
         ...initialProject,
         updatedAt: updatedAtAfterScaffold,
         expoSdk: scaffold.sdk,
-        files: collected.files,
+        fileIndex: Object.keys(collected.files).sort((a, b) => a.localeCompare(b)),
         messages: [
             {
                 id: randomUUID(),

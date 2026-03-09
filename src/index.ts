@@ -5,6 +5,7 @@ import cors from "cors";
 import express from "express";
 import devSessionRoutes from "./routes/devSession.js";
 import expoScaffoldRoutes from "./routes/expoScaffold.js";
+import repoWorkspaceRoutes from "./routes/repoWorkspace.js";
 import shopifyMobileAiRoutes from "./routes/shopifyMobileAi.js";
 import taskRoutes from "./routes/tasks.js";
 import { collectIdleProjectIds, getUserIdleTimeoutMs } from "./services/activityTracker.js";
@@ -38,7 +39,8 @@ app.use((req, res, next) => {
         req.originalUrl.startsWith("/api/shopify-mobile/scaffold-expo") ||
         req.originalUrl.startsWith("/api/shopify-mobile/generate-preview") ||
         req.originalUrl.startsWith("/api/shopify-mobile/opencode/prompt") ||
-        req.originalUrl.startsWith("/api/shopify-mobile/tasks/workspace/create");
+        req.originalUrl.startsWith("/api/shopify-mobile/tasks/workspace/create") ||
+        req.originalUrl.startsWith("/api/shopify-mobile/repo/");
 
     if (!shouldLog) {
         next();
@@ -82,6 +84,7 @@ app.use("/api", shopifyMobileAiRoutes);
 app.use("/api", expoScaffoldRoutes);
 app.use("/api", devSessionRoutes);
 app.use("/api", taskRoutes);
+app.use("/api", repoWorkspaceRoutes);
 
 app.use(
     (
