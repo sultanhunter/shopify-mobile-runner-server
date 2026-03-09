@@ -72,6 +72,8 @@ interface DevSessionInternal {
     stopRequested?: boolean;
     expoUrlBackfillInFlight?: boolean;
     expoUrlBackfillAttempts?: number;
+    expoStartedWithTunnel?: boolean;
+    tunnelFallbackAttempted?: boolean;
 }
 
 const sessions = new Map<string, DevSessionInternal>();
@@ -565,6 +567,84 @@ function tryMarkReadyFromLine(session: DevSessionInternal, line: string) {
     }
 }
 
+function shouldFallbackFromTunnel(session: DevSessionInternal): boolean {
+    if (!session.expoStartedWithTunnel || session.tunnelFallbackAttempted) {
+        return false;
+    }
+
+    const recent = session.logs.slice(-120).join("\n").toLowerCase();
+    return (
+        (recent.includes("ngrok") && recent.includes("status page")) ||
+        recent.includes("cannot read properties of undefined (reading 'body')") ||
+        (recent.includes("commanderror") && recent.includes("tunnel"))
+    );
+}
+
+function launchExpoProcess(session: DevSessionInternal, useTunnel: boolean) {
+    const expoArgs = getExpoStartArgs(useTunnel);
+    appendLog(session, `$ npx ${expoArgs.join(" ")}`);
+
+    const child = spawn("npx", expoArgs, {
+        cwd: session.repoPath,
+        env: {
+            ...process.env,
+            NODE_ENV: "development",
+        },
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    updateSession(session, {
+        expoProcess: child,
+        expoStartedWithTunnel: useTunnel,
+    });
+
+    if (child.stdout) {
+        listenStream(session, child.stdout, "expo");
+    }
+    if (child.stderr) {
+        listenStream(session, child.stderr, "expo-error");
+    }
+
+    child.on("exit", (code, signal) => {
+        const active = sessions.get(session.id);
+        if (!active) return;
+
+        updateSession(active, {
+            expoProcess: undefined,
+        });
+
+        if (active.status === "stopped") {
+            appendLog(active, `Expo process exited after stop (code=${code}, signal=${signal}).`);
+            return;
+        }
+
+        if (shouldFallbackFromTunnel(active)) {
+            appendLog(active, "Expo tunnel startup failed. Retrying Expo start without tunnel...");
+            logSessionEvent(active, "retrying expo start without tunnel due to tunnel failure");
+            updateSession(active, {
+                status: "starting",
+                error: undefined,
+                expoUrl: undefined,
+                webUrl: undefined,
+                expoUrlBackfillInFlight: false,
+                expoUrlBackfillAttempts: 0,
+                tunnelFallbackAttempted: true,
+            });
+            launchExpoProcess(active, false);
+            return;
+        }
+
+        const message = `Expo process exited unexpectedly (code=${code}, signal=${signal}).`;
+        appendLog(active, message);
+        logSessionEvent(active, message);
+        updateSession(active, {
+            status: "failed",
+            error: message,
+        });
+    });
+}
+
 async function warmupWebPreview(session: DevSessionInternal) {
   if (!session.webUrl || session.webWarmupStatus === "running" || session.webWarmupStatus === "completed") {
     return;
@@ -644,11 +724,21 @@ function getExpoStartArgs(useTunnel: boolean): string[] {
     const args = ["expo", "start", "--port", String(EXPO_DEFAULT_PORT)];
     if (useTunnel) {
         args.push("--tunnel");
+    } else {
+        args.push("--host", "lan");
     }
 
     const extra = process.env.SHOPIFY_MOBILE_EXPO_START_ARGS?.trim();
     if (extra) {
-        args.push(...extra.split(/\s+/).filter(Boolean));
+        const extraParts = extra.split(/\s+/).filter(Boolean);
+        const hasHostOverride = extraParts.includes("--host");
+
+        if (!useTunnel && hasHostOverride) {
+            // Remove default --host lan when caller provides explicit host override.
+            return ["expo", "start", "--port", String(EXPO_DEFAULT_PORT), ...extraParts];
+        }
+
+        args.push(...extraParts);
     }
 
     return args;
@@ -737,48 +827,7 @@ async function bootstrapSession(session: DevSessionInternal, input: StartDevSess
         return;
     }
 
-    const expoArgs = getExpoStartArgs(shouldUseTunnel);
-    appendLog(session, `$ npx ${expoArgs.join(" ")}`);
-
-    const child = spawn("npx", expoArgs, {
-        cwd: session.repoPath,
-        env: {
-            ...process.env,
-            NODE_ENV: "development",
-        },
-        detached: process.platform !== "win32",
-        stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    session.expoProcess = child;
-    if (child.stdout) {
-        listenStream(session, child.stdout, "expo");
-    }
-    if (child.stderr) {
-        listenStream(session, child.stderr, "expo-error");
-    }
-
-    child.on("exit", (code, signal) => {
-        const active = sessions.get(session.id);
-        if (!active) return;
-
-        updateSession(active, {
-            expoProcess: undefined,
-        });
-
-        if (active.status === "stopped") {
-            appendLog(active, `Expo process exited after stop (code=${code}, signal=${signal}).`);
-            return;
-        }
-
-        const message = `Expo process exited unexpectedly (code=${code}, signal=${signal}).`;
-        appendLog(active, message);
-        logSessionEvent(active, message);
-        updateSession(active, {
-            status: "failed",
-            error: message,
-        });
-    });
+    launchExpoProcess(session, shouldUseTunnel);
 }
 
 function sanitizeRelativePath(filePath: string): string {
@@ -862,6 +911,8 @@ async function stopSessionInternal(session: DevSessionInternal, reason: string, 
         webUrl: undefined,
         expoUrlBackfillInFlight: false,
         expoUrlBackfillAttempts: 0,
+        expoStartedWithTunnel: false,
+        tunnelFallbackAttempted: false,
     });
 
     appendLog(session, reason);
@@ -951,6 +1002,8 @@ export async function startDevSession(input: StartDevSessionInput): Promise<DevS
         stopRequested: false,
         expoUrlBackfillInFlight: false,
         expoUrlBackfillAttempts: 0,
+        expoStartedWithTunnel: false,
+        tunnelFallbackAttempted: false,
     };
 
     sessions.set(id, session);
