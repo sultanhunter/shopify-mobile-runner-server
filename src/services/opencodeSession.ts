@@ -8,6 +8,7 @@ const BINARY_BASE64_PREFIX = "__binary_base64__:";
 const PERSISTENT_PROJECTS_ROOT = "/var/shopify-mobile/projects";
 const DEFAULT_OPENCODE_AGENT = "shopify-app-builder";
 const MAX_SYNCED_FILE_BYTES = 1000000;
+const PROCESS_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 interface PersistedSessionState {
     projectId: string;
@@ -42,6 +43,7 @@ interface OpenCodePromptResult {
 type OpenCodeEvent = Record<string, unknown>;
 
 const activeSessions = new Map<string, PersistedSessionState>();
+const projectLocks = new Map<string, Promise<void>>();
 
 function nowIso(): string {
     return new Date().toISOString();
@@ -261,6 +263,27 @@ async function savePersistedSession(state: PersistedSessionState): Promise<void>
     await writeFile(sessionStatePath(state.workspacePath), JSON.stringify(state, null, 2), "utf8");
 }
 
+async function withProjectLock<T>(projectId: string, work: () => Promise<T>): Promise<T> {
+    const previous = projectLocks.get(projectId) ?? Promise.resolve();
+    let releaseLock!: () => void;
+    const lock = new Promise<void>((resolve) => {
+        releaseLock = resolve;
+    });
+    const chain = previous.then(() => lock);
+    projectLocks.set(projectId, chain);
+
+    await previous;
+
+    try {
+        return await work();
+    } finally {
+        releaseLock();
+        if (projectLocks.get(projectId) === chain) {
+            projectLocks.delete(projectId);
+        }
+    }
+}
+
 function parseRunJsonOutput(stdout: string): {
     sessionId?: string;
     assistantText: string;
@@ -327,11 +350,49 @@ async function runOpenCodeJsonCommand(args: string[], cwd: string, onEvent?: (ev
         let stdout = "";
         let stderr = "";
         let streamBuffer = "";
+        let idleTimeout: NodeJS.Timeout | null = null;
+        let killedByIdleTimeout = false;
+
+        const clearIdleTimeout = () => {
+            if (idleTimeout) {
+                clearTimeout(idleTimeout);
+                idleTimeout = null;
+            }
+        };
+
+        const resetIdleTimeout = () => {
+            clearIdleTimeout();
+
+            idleTimeout = setTimeout(() => {
+                killedByIdleTimeout = true;
+
+                try {
+                    child.kill("SIGTERM");
+                } catch {
+                    // Ignore if already exited.
+                }
+
+                setTimeout(() => {
+                    if (child.exitCode === null) {
+                        try {
+                            child.kill("SIGKILL");
+                        } catch {
+                            // Ignore if already exited.
+                        }
+                    }
+                }, 5000).unref();
+            }, PROCESS_IDLE_TIMEOUT_MS);
+
+            idleTimeout.unref();
+        };
+
+        resetIdleTimeout();
 
         if (child.stdout) {
             child.stdout.on("data", (chunk: Buffer | string) => {
                 const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
                 stdout += text;
+                resetIdleTimeout();
 
                 if (!onEvent) {
                     return;
@@ -357,14 +418,18 @@ async function runOpenCodeJsonCommand(args: string[], cwd: string, onEvent?: (ev
         if (child.stderr) {
             child.stderr.on("data", (chunk: Buffer | string) => {
                 stderr += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+                resetIdleTimeout();
             });
         }
 
         child.on("error", (error) => {
+            clearIdleTimeout();
             reject(error);
         });
 
         child.on("close", (code) => {
+            clearIdleTimeout();
+
             const trailing = streamBuffer.trim();
             if (onEvent && trailing.startsWith("{")) {
                 try {
@@ -375,6 +440,14 @@ async function runOpenCodeJsonCommand(args: string[], cwd: string, onEvent?: (ev
             }
 
             const parsed = parseRunJsonOutput(stdout);
+            if (killedByIdleTimeout) {
+                parsed.errors.push(
+                    `OpenCode run was stopped after ${Math.round(
+                        PROCESS_IDLE_TIMEOUT_MS / 60000,
+                    )} minutes of inactivity. Send another prompt to continue.`,
+                );
+            }
+
             if (code !== 0 && parsed.errors.length === 0) {
                 const fallback = stderr.trim() || `OpenCode exited with code ${code}.`;
                 parsed.errors.push(fallback);
@@ -453,14 +526,14 @@ function getExistingSession(projectId: string, workspacePath: string): Persisted
 }
 
 export async function runShopifyOpenCodePrompt(input: OpenCodePromptInput): Promise<OpenCodePromptResult> {
-    return runShopifyOpenCodePromptInternal(input);
+    return withProjectLock(input.projectId, () => runShopifyOpenCodePromptInternal(input));
 }
 
 export async function streamShopifyOpenCodePrompt(
     input: OpenCodePromptInput,
     onEvent: (event: OpenCodeEvent) => void,
 ): Promise<OpenCodePromptResult> {
-    return runShopifyOpenCodePromptInternal(input, onEvent);
+    return withProjectLock(input.projectId, () => runShopifyOpenCodePromptInternal(input, onEvent));
 }
 
 async function runShopifyOpenCodePromptInternal(
