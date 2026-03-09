@@ -1,6 +1,7 @@
 import { Request, Response, Router } from "express";
-import { runShopifyOpenCodePrompt, streamShopifyOpenCodePrompt } from "../services/opencodeSession.js";
+import { runShopifyOpenCodePrompt, stopOpenCodeRunForProject, streamShopifyOpenCodePrompt } from "../services/opencodeSession.js";
 import { generateShopifyMobilePreviewUpdate } from "../services/shopifyMobileAi.js";
+import { markProjectActivity } from "../services/activityTracker.js";
 
 interface GeneratePreviewBody {
     projectId?: unknown;
@@ -88,6 +89,13 @@ router.post("/shopify-mobile/opencode/prompt", async (req: Request, res: Respons
     }
 
     try {
+        markProjectActivity(projectId, "opencode/prompt");
+
+        const keepAliveActivity = setInterval(() => {
+            markProjectActivity(projectId, "opencode/prompt/keepalive");
+        }, 15000);
+        keepAliveActivity.unref();
+
         const result = await runShopifyOpenCodePrompt({
             projectId,
             repoUrl,
@@ -95,6 +103,8 @@ router.post("/shopify-mobile/opencode/prompt", async (req: Request, res: Respons
             prompt,
             model: model ?? undefined,
             thinking: thinking ?? undefined,
+        }).finally(() => {
+            clearInterval(keepAliveActivity);
         });
 
         return res.json({ result });
@@ -130,6 +140,20 @@ router.post("/shopify-mobile/opencode/prompt/stream", async (req: Request, res: 
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
 
+    markProjectActivity(projectId, "opencode/stream/start");
+
+    let streamClosedEarly = false;
+    const keepAliveActivity = setInterval(() => {
+        markProjectActivity(projectId, "opencode/stream/keepalive");
+    }, 15000);
+    keepAliveActivity.unref();
+
+    req.on("close", () => {
+        streamClosedEarly = true;
+        clearInterval(keepAliveActivity);
+        stopOpenCodeRunForProject(projectId, "client disconnected during stream");
+    });
+
     const writeEvent = (payload: Record<string, unknown>) => {
         res.write(`${JSON.stringify(payload)}\n`);
     };
@@ -145,13 +169,26 @@ router.post("/shopify-mobile/opencode/prompt/stream", async (req: Request, res: 
                 thinking: thinking ?? undefined,
             },
             (event) => {
+                markProjectActivity(projectId, "opencode/stream/event");
                 writeEvent({ type: "event", event });
             },
         );
 
+        clearInterval(keepAliveActivity);
+
+        if (streamClosedEarly) {
+            return;
+        }
+
         writeEvent({ type: "result", result });
         res.end();
     } catch (error) {
+        clearInterval(keepAliveActivity);
+
+        if (streamClosedEarly) {
+            return;
+        }
+
         writeEvent({
             type: "error",
             error: error instanceof Error ? error.message : "Failed to run OpenCode prompt stream.",

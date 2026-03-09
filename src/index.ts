@@ -7,7 +7,9 @@ import devSessionRoutes from "./routes/devSession.js";
 import expoScaffoldRoutes from "./routes/expoScaffold.js";
 import shopifyMobileAiRoutes from "./routes/shopifyMobileAi.js";
 import taskRoutes from "./routes/tasks.js";
-import { getDevSessionStats } from "./services/devSession.js";
+import { collectIdleProjectIds, getUserIdleTimeoutMs } from "./services/activityTracker.js";
+import { getDevSessionStats, listActiveDevSessionProjectIds, stopDevSessionsForProjects } from "./services/devSession.js";
+import { listActiveOpenCodeRunProjectIds, stopOpenCodeRunsForProjects } from "./services/opencodeSession.js";
 
 dotenv.config();
 
@@ -15,6 +17,7 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const ENABLE_REQUEST_LOGS = (process.env.SERVER_REQUEST_LOGS ?? "true").toLowerCase() !== "false";
 const ENABLE_HEARTBEAT_LOGS = (process.env.SERVER_HEARTBEAT_LOGS ?? "false").toLowerCase() === "true";
+const IDLE_SWEEP_INTERVAL_MS = Number(process.env.SERVER_IDLE_SWEEP_MS ?? "30000");
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
@@ -115,6 +118,46 @@ if (ENABLE_HEARTBEAT_LOGS) {
         );
     }, Number(process.env.SERVER_HEARTBEAT_MS ?? "30000"));
 }
+
+let idleSweepInProgress = false;
+setInterval(() => {
+    if (idleSweepInProgress) {
+        return;
+    }
+
+    idleSweepInProgress = true;
+    void (async () => {
+        try {
+            const activeProjects = new Set<string>([
+                ...listActiveDevSessionProjectIds(),
+                ...listActiveOpenCodeRunProjectIds(),
+            ]);
+
+            if (activeProjects.size === 0) {
+                return;
+            }
+
+            const idleProjectIds = collectIdleProjectIds([...activeProjects]);
+            if (idleProjectIds.length === 0) {
+                return;
+            }
+
+            const reason = `user idle timeout reached (${Math.round(getUserIdleTimeoutMs() / 60000)}m)`;
+            const [stoppedDevSessions, stoppedOpenCodeRuns] = await Promise.all([
+                stopDevSessionsForProjects(idleProjectIds, reason),
+                Promise.resolve(stopOpenCodeRunsForProjects(idleProjectIds, reason)),
+            ]);
+
+            console.log(
+                `[IDLE_SWEEP] projects=${idleProjectIds.length} stoppedDevSessions=${stoppedDevSessions} stoppedOpenCodeRuns=${stoppedOpenCodeRuns}`,
+            );
+        } catch (error) {
+            console.error("[IDLE_SWEEP_ERROR]", error);
+        } finally {
+            idleSweepInProgress = false;
+        }
+    })();
+}, Number.isFinite(IDLE_SWEEP_INTERVAL_MS) && IDLE_SWEEP_INTERVAL_MS > 0 ? IDLE_SWEEP_INTERVAL_MS : 30000).unref();
 
 process.on("unhandledRejection", (reason) => {
     console.error("[UNHANDLED_REJECTION]", reason);

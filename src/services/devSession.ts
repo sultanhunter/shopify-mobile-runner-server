@@ -848,25 +848,31 @@ async function stopExpoProcess(session: DevSessionInternal) {
     });
 }
 
+async function stopSessionInternal(session: DevSessionInternal, reason: string, source: "api" | "auto") {
+    updateSession(session, {
+        stopRequested: true,
+    });
+
+    await stopExpoProcess(session);
+    updateSession(session, {
+        status: "stopped",
+        error: undefined,
+        expoProcess: undefined,
+        expoUrl: undefined,
+        webUrl: undefined,
+        expoUrlBackfillInFlight: false,
+        expoUrlBackfillAttempts: 0,
+    });
+
+    appendLog(session, reason);
+    logSessionEvent(session, source === "api" ? "stopped by API request" : `auto-stopped reason=${reason}`);
+}
+
 async function stopAllActiveSessions(reason: string) {
     const activeSessions = [...sessions.values()].filter((session) => isActiveSessionStatus(session.status));
 
     for (const session of activeSessions) {
-        updateSession(session, {
-            stopRequested: true,
-        });
-        await stopExpoProcess(session);
-        updateSession(session, {
-            status: "stopped",
-            error: undefined,
-            expoProcess: undefined,
-            expoUrl: undefined,
-            webUrl: undefined,
-            expoUrlBackfillInFlight: false,
-            expoUrlBackfillAttempts: 0,
-        });
-        appendLog(session, `Dev session stopped automatically: ${reason}`);
-        logSessionEvent(session, `auto-stopped reason=${reason}`);
+        await stopSessionInternal(session, `Dev session stopped automatically: ${reason}`, "auto");
     }
 }
 
@@ -975,24 +981,36 @@ export async function stopDevSession(sessionId: string): Promise<DevSessionPubli
     const session = sessions.get(sessionId);
     if (!session) return null;
 
-    updateSession(session, {
-        stopRequested: true,
-    });
-
-    await stopExpoProcess(session);
-    updateSession(session, {
-        status: "stopped",
-        error: undefined,
-        expoProcess: undefined,
-        expoUrl: undefined,
-        webUrl: undefined,
-        expoUrlBackfillInFlight: false,
-        expoUrlBackfillAttempts: 0,
-    });
-    appendLog(session, "Dev session stopped.");
-    logSessionEvent(session, "stopped by API request");
+    await stopSessionInternal(session, "Dev session stopped.", "api");
 
     return toPublicSession(session, 200);
+}
+
+export function listActiveDevSessionProjectIds(): string[] {
+    const ids = new Set<string>();
+    for (const session of sessions.values()) {
+        if (isActiveSessionStatus(session.status)) {
+            ids.add(session.projectId);
+        }
+    }
+
+    return [...ids];
+}
+
+export async function stopDevSessionsForProjects(projectIds: string[], reason: string): Promise<number> {
+    const targets = new Set(projectIds);
+    let stopped = 0;
+
+    for (const session of sessions.values()) {
+        if (!targets.has(session.projectId) || !isActiveSessionStatus(session.status)) {
+            continue;
+        }
+
+        await stopSessionInternal(session, `Dev session stopped automatically: ${reason}`, "auto");
+        stopped += 1;
+    }
+
+    return stopped;
 }
 
 export async function applyAndPushDevSessionChanges(

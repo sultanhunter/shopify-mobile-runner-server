@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { ChildProcess, execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { access, constants, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -44,6 +44,7 @@ type OpenCodeEvent = Record<string, unknown>;
 
 const activeSessions = new Map<string, PersistedSessionState>();
 const projectLocks = new Map<string, Promise<void>>();
+const activeOpenCodeRuns = new Map<string, ChildProcess>();
 
 function nowIso(): string {
     return new Date().toISOString();
@@ -336,6 +337,26 @@ async function runOpenCodeJsonCommand(args: string[], cwd: string, onEvent?: (ev
     sessionId?: string;
     assistantText: string;
     errors: string[];
+}>;
+async function runOpenCodeJsonCommand(
+    args: string[],
+    cwd: string,
+    onEvent: ((event: OpenCodeEvent) => void) | undefined,
+    projectId: string,
+): Promise<{
+    sessionId?: string;
+    assistantText: string;
+    errors: string[];
+}>;
+async function runOpenCodeJsonCommand(
+    args: string[],
+    cwd: string,
+    onEvent?: (event: OpenCodeEvent) => void,
+    projectId?: string,
+): Promise<{
+    sessionId?: string;
+    assistantText: string;
+    errors: string[];
 }> {
     return await new Promise((resolve, reject) => {
         const child = spawn("opencode", args, {
@@ -386,6 +407,19 @@ async function runOpenCodeJsonCommand(args: string[], cwd: string, onEvent?: (ev
             idleTimeout.unref();
         };
 
+        if (projectId) {
+            activeOpenCodeRuns.set(projectId, child);
+        }
+
+        const clearActiveRun = () => {
+            if (!projectId) return;
+
+            const active = activeOpenCodeRuns.get(projectId);
+            if (active === child) {
+                activeOpenCodeRuns.delete(projectId);
+            }
+        };
+
         resetIdleTimeout();
 
         if (child.stdout) {
@@ -424,11 +458,13 @@ async function runOpenCodeJsonCommand(args: string[], cwd: string, onEvent?: (ev
 
         child.on("error", (error) => {
             clearIdleTimeout();
+            clearActiveRun();
             reject(error);
         });
 
         child.on("close", (code) => {
             clearIdleTimeout();
+            clearActiveRun();
 
             const trailing = streamBuffer.trim();
             if (onEvent && trailing.startsWith("{")) {
@@ -456,6 +492,78 @@ async function runOpenCodeJsonCommand(args: string[], cwd: string, onEvent?: (ev
             resolve(parsed);
         });
     });
+}
+
+function terminateOpenCodeProcess(processRef: ChildProcess): boolean {
+    const pid = processRef.pid;
+    let signaled = false;
+
+    if (process.platform !== "win32" && typeof pid === "number") {
+        try {
+            process.kill(-pid, "SIGTERM");
+            signaled = true;
+        } catch {
+            // Fall through to direct child kill.
+        }
+    }
+
+    try {
+        processRef.kill("SIGTERM");
+        signaled = true;
+    } catch {
+        // Ignore if already exited.
+    }
+
+    setTimeout(() => {
+        if (processRef.exitCode !== null) {
+            return;
+        }
+
+        if (process.platform !== "win32" && typeof pid === "number") {
+            try {
+                process.kill(-pid, "SIGKILL");
+            } catch {
+                // Fall through.
+            }
+        }
+
+        try {
+            processRef.kill("SIGKILL");
+        } catch {
+            // Ignore if already exited.
+        }
+    }, 5000).unref();
+
+    return signaled;
+}
+
+export function listActiveOpenCodeRunProjectIds(): string[] {
+    return [...activeOpenCodeRuns.keys()];
+}
+
+export function stopOpenCodeRunForProject(projectId: string, reason: string): boolean {
+    const processRef = activeOpenCodeRuns.get(projectId);
+    if (!processRef) {
+        return false;
+    }
+
+    const signaled = terminateOpenCodeProcess(processRef);
+    if (signaled) {
+        console.log(`[OPENCODE][${projectId}] run stopped: ${reason}`);
+    }
+
+    return signaled;
+}
+
+export function stopOpenCodeRunsForProjects(projectIds: string[], reason: string): number {
+    let stopped = 0;
+    for (const projectId of projectIds) {
+        if (stopOpenCodeRunForProject(projectId, reason)) {
+            stopped += 1;
+        }
+    }
+
+    return stopped;
 }
 
 function parseGitStatusPaths(stdout: string): string[] {
@@ -571,7 +679,7 @@ async function runShopifyOpenCodePromptInternal(
 
     args.push(input.prompt);
 
-    const parsed = await runOpenCodeJsonCommand(args, repoPath, onEvent);
+    const parsed = await runOpenCodeJsonCommand(args, repoPath, onEvent, input.projectId);
 
     if (parsed.errors.length > 0) {
         throw new Error(parsed.errors.join(" | "));

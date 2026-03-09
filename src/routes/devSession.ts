@@ -6,6 +6,7 @@ import {
     startDevSession,
     stopDevSession,
 } from "../services/devSession.js";
+import { markProjectActivity } from "../services/activityTracker.js";
 
 interface StartDevSessionBody {
     projectId?: unknown;
@@ -74,6 +75,8 @@ router.post("/shopify-mobile/dev-session/start", async (req: Request, res: Respo
             useTunnel: asBoolean(body.useTunnel, true),
         });
 
+        markProjectActivity(projectId, "dev-session/start");
+
         return res.status(202).json({ session });
     } catch (error) {
         return res.status(500).json({
@@ -94,6 +97,8 @@ router.get("/shopify-mobile/dev-session/:sessionId/status", async (req: Request,
     if (!session) {
         return res.status(404).json({ error: "Session not found." });
     }
+
+    markProjectActivity(session.projectId, "dev-session/status");
 
     return res.json({ session });
 });
@@ -118,6 +123,8 @@ router.post("/shopify-mobile/dev-session/:sessionId/stop", async (req: Request, 
         return res.status(404).json({ error: "Session not found." });
     }
 
+    markProjectActivity(session.projectId, "dev-session/stop");
+
     return res.json({ session });
 });
 
@@ -132,6 +139,11 @@ router.post("/shopify-mobile/dev-session/:sessionId/apply-and-push", async (req:
     const runInstall = asBoolean(body.runInstall, false);
 
     try {
+        const existing = getDevSession(req.params.sessionId, 1);
+        if (existing) {
+            markProjectActivity(existing.projectId, "dev-session/commit");
+        }
+
         const result = await applyAndPushDevSessionChanges(req.params.sessionId, {
             files,
             commitMessage,
