@@ -24,6 +24,9 @@ Standalone runner backend for the Shopify Mobile AI MVP.
 4. Build: `npm run build`
 5. Run dev: `npm run dev`
 
+GitHub repository creation is required by default for workspace creation (`RUNNER_REQUIRE_GITHUB_REPO=true`).
+Set `GITHUB_TOKEN` (and optionally `GITHUB_OWNER`) on the runner before creating workspaces.
+
 ## Deployment Script
 
 - Use `npm run deploy` to run: git fetch/pull, npm install, build, and PM2 restart.

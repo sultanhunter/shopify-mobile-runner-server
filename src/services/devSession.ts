@@ -439,6 +439,21 @@ async function runExec(session: DevSessionInternal, command: string, args: strin
     }
 }
 
+async function getGitRemoteUrl(cwd: string, remoteName: string): Promise<string | undefined> {
+    try {
+        const result = await execFileAsync("git", ["remote", "get-url", remoteName], {
+            cwd,
+            timeout: 15000,
+            maxBuffer: 2 * 1024 * 1024,
+        });
+
+        const value = result.stdout.trim();
+        return value || undefined;
+    } catch {
+        return undefined;
+    }
+}
+
 async function ensureRepoForDevSession(
     session: DevSessionInternal,
     input: StartDevSessionInput,
@@ -448,6 +463,12 @@ async function ensureRepoForDevSession(
 
     const gitDir = path.join(session.repoPath, ".git");
     if (!(await pathExists(gitDir))) {
+        if (!input.repoUrl?.trim()) {
+            throw new Error(
+                "No GitHub repository URL configured and no local git repo exists yet. Recreate workspace with GitHub enabled.",
+            );
+        }
+
         const cloneRepoUrl = withGithubToken(input.repoUrl);
         await runExec(
             session,
@@ -465,6 +486,12 @@ async function ensureRepoForDevSession(
 
     if (status.stdout.trim()) {
         appendLog(session, "Reusing existing repo with local changes; skipping pull.");
+        return;
+    }
+
+    const originRemote = await getGitRemoteUrl(session.repoPath, "origin");
+    if (!originRemote) {
+        appendLog(session, "No origin remote configured in local repo; skipping fetch/pull and running from local workspace.");
         return;
     }
 
@@ -1604,6 +1631,23 @@ export async function applyAndPushDevSessionChanges(
         cwd: session.repoPath,
         env: gitIdentityEnv(),
     });
+
+    const originRemote = await getGitRemoteUrl(session.repoPath, "origin");
+    if (!originRemote) {
+        const head = await runExec(session, "git", ["rev-parse", "HEAD"], {
+            cwd: session.repoPath,
+        });
+
+        const commitSha = head.stdout.trim();
+        appendLog(session, `Changes committed locally at ${commitSha}. No origin remote configured, so push was skipped.`);
+        logSessionEvent(session, `commit completed locally commit=${commitSha}`);
+
+        return {
+            session: toPublicSession(session, 200),
+            committed: true,
+            commitSha,
+        };
+    }
 
     await runExec(session, "git", ["push", "origin", session.branch], {
         cwd: session.repoPath,

@@ -8,6 +8,7 @@ import { insertWorkspaceTask, updateWorkspaceTask, upsertProject } from "./supab
 
 const execFileAsync = promisify(execFile);
 const PROJECTS_ROOT = "/var/shopify-mobile/projects";
+const REQUIRE_GITHUB_REPO = (process.env.RUNNER_REQUIRE_GITHUB_REPO ?? "true").toLowerCase() !== "false";
 
 interface CreateWorkspaceInput {
     name: string;
@@ -474,10 +475,18 @@ async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInpu
             github.enabled = false;
             github.error = error instanceof Error ? error.message : "Failed to create GitHub repository.";
             console.warn(`[TASK ${taskId}] github init failed: ${github.error}`);
+
+            if (REQUIRE_GITHUB_REPO) {
+                throw new Error(`GitHub repository initialization failed: ${github.error}`);
+            }
         }
     } else {
         github.error = "Set GITHUB_TOKEN to enable automatic repository creation and commits.";
         console.log(`[TASK ${taskId}] github skipped (token missing)`);
+
+        if (REQUIRE_GITHUB_REPO) {
+            throw new Error("Missing GITHUB_TOKEN. Runner requires GitHub repository initialization for every workspace.");
+        }
     }
 
     const finalizedProject = {
