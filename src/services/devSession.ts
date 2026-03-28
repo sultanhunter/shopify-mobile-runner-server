@@ -225,6 +225,7 @@ function resolvePublicBaseUrl(session: DevSessionInternal): string | undefined {
     }
 
     const envBase =
+        process.env.RUNNER_SERVER_BASE_URL?.trim() ||
         process.env.SHOPIFY_MOBILE_RUNNER_PUBLIC_BASE_URL?.trim() ||
         process.env.SHOPIFY_MOBILE_PUBLIC_BASE_URL?.trim();
     if (envBase) {
