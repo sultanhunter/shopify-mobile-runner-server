@@ -5,6 +5,15 @@ import { enqueueCreateWorkspaceTask } from "../services/workspaceTask.js";
 interface CreateWorkspaceTaskBody {
     name?: unknown;
     sdk?: unknown;
+    workspaceLayout?: unknown;
+}
+
+interface WorkspaceLayoutBody {
+    mobileAppDir?: unknown;
+    expoBackendDir?: unknown;
+    expoBackendPort?: unknown;
+    backendDir?: unknown;
+    backendPort?: unknown;
 }
 
 function asNonEmptyString(value: unknown): string | null {
@@ -19,8 +28,23 @@ function bearerToken(headerValue: string | undefined): string | null {
     return token;
 }
 
+function asPositiveNumber(value: unknown): number | null {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        return Math.round(value);
+    }
+
+    if (typeof value === "string") {
+        const parsed = Number(value.trim());
+        if (Number.isFinite(parsed) && parsed > 0) {
+            return Math.round(parsed);
+        }
+    }
+
+    return null;
+}
+
 function authorizeRequest(req: Request, res: Response): boolean {
-    const requiredToken = process.env.SHOPIFY_MOBILE_AI_SERVER_TOKEN?.trim();
+    const requiredToken = process.env.RUNNER_SERVER_TOKEN?.trim() || process.env.SHOPIFY_MOBILE_AI_SERVER_TOKEN?.trim();
     const token = bearerToken(req.headers.authorization);
 
     if (requiredToken && token !== requiredToken) {
@@ -41,6 +65,17 @@ router.post("/shopify-mobile/tasks/workspace/create", async (req: Request, res: 
     const body = req.body as CreateWorkspaceTaskBody;
     const name = asNonEmptyString(body.name);
     const sdk = asNonEmptyString(body.sdk) ?? getDefaultExpoSdk();
+    const rawLayout = (body.workspaceLayout && typeof body.workspaceLayout === "object"
+        ? body.workspaceLayout
+        : {}) as WorkspaceLayoutBody;
+
+    const workspaceLayout = {
+        mobileAppDir: asNonEmptyString(rawLayout.mobileAppDir) ?? "mobile",
+        expoBackendDir: asNonEmptyString(rawLayout.expoBackendDir) ?? asNonEmptyString(rawLayout.backendDir) ?? "expo-backend",
+        expoBackendPort: asPositiveNumber(rawLayout.expoBackendPort) ?? asPositiveNumber(rawLayout.backendPort) ?? 4100,
+        backendDir: asNonEmptyString(rawLayout.expoBackendDir) ?? asNonEmptyString(rawLayout.backendDir) ?? "expo-backend",
+        backendPort: asPositiveNumber(rawLayout.expoBackendPort) ?? asPositiveNumber(rawLayout.backendPort) ?? 4100,
+    };
 
     if (!name) {
         return res.status(400).json({ error: "name is required." });
@@ -51,6 +86,7 @@ router.post("/shopify-mobile/tasks/workspace/create", async (req: Request, res: 
         const task = await enqueueCreateWorkspaceTask({
             name,
             sdk: resolved.sdk,
+            workspaceLayout,
         });
 
         console.log(

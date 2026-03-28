@@ -14,6 +14,19 @@ interface StartDevSessionBody {
     branch?: unknown;
     install?: unknown;
     useTunnel?: unknown;
+    appDirectory?: unknown;
+    expoBackendDirectory?: unknown;
+    expoBackendPort?: unknown;
+    expoBackendStartCommand?: unknown;
+    expoBackendHealthPath?: unknown;
+    startExpoBackend?: unknown;
+    backendDirectory?: unknown;
+    backendPort?: unknown;
+    backendStartCommand?: unknown;
+    backendHealthPath?: unknown;
+    startBackend?: unknown;
+    injectExpoPublicRuntimeBackendUrl?: unknown;
+    publicBaseUrl?: unknown;
 }
 
 interface ApplyAndPushBody {
@@ -30,6 +43,34 @@ function asBoolean(value: unknown, fallback: boolean): boolean {
     return typeof value === "boolean" ? value : fallback;
 }
 
+function asPositiveNumber(value: unknown): number | undefined {
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        return Math.round(value);
+    }
+
+    if (typeof value === "string") {
+        const parsed = Number(value.trim());
+        if (Number.isFinite(parsed) && parsed > 0) {
+            return Math.round(parsed);
+        }
+    }
+
+    return undefined;
+}
+
+function resolveRequestBaseUrl(req: Request): string | undefined {
+    const host = req.headers["x-forwarded-host"] || req.headers.host;
+    const rawHost = Array.isArray(host) ? host[0] : host;
+    if (!rawHost) {
+        return undefined;
+    }
+
+    const protoHeader = req.headers["x-forwarded-proto"];
+    const forwardedProto = Array.isArray(protoHeader) ? protoHeader[0] : protoHeader;
+    const protocol = (typeof forwardedProto === "string" && forwardedProto.trim()) || req.protocol || "http";
+    return `${protocol}://${rawHost}`;
+}
+
 function bearerToken(headerValue: string | undefined): string | null {
     if (!headerValue) return null;
     const [scheme, token] = headerValue.split(" ");
@@ -39,7 +80,7 @@ function bearerToken(headerValue: string | undefined): string | null {
 }
 
 function authorizeRequest(req: Request, res: Response): boolean {
-    const requiredToken = process.env.SHOPIFY_MOBILE_AI_SERVER_TOKEN?.trim();
+    const requiredToken = process.env.RUNNER_SERVER_TOKEN?.trim() || process.env.SHOPIFY_MOBILE_AI_SERVER_TOKEN?.trim();
     const token = bearerToken(req.headers.authorization);
 
     if (requiredToken && token !== requiredToken) {
@@ -61,6 +102,7 @@ router.post("/shopify-mobile/dev-session/start", async (req: Request, res: Respo
     const projectId = asNonEmptyString(body.projectId);
     const repoUrl = asNonEmptyString(body.repoUrl);
     const branch = asNonEmptyString(body.branch) ?? "main";
+    const publicBaseUrl = asNonEmptyString(body.publicBaseUrl) ?? resolveRequestBaseUrl(req);
 
     if (!projectId || !repoUrl) {
         return res.status(400).json({ error: "projectId and repoUrl are required." });
@@ -73,6 +115,21 @@ router.post("/shopify-mobile/dev-session/start", async (req: Request, res: Respo
             branch,
             install: asBoolean(body.install, true),
             useTunnel: asBoolean(body.useTunnel, true),
+            appDirectory: asNonEmptyString(body.appDirectory) ?? undefined,
+            expoBackendDirectory: asNonEmptyString(body.expoBackendDirectory) ?? asNonEmptyString(body.backendDirectory) ?? undefined,
+            expoBackendPort: asPositiveNumber(body.expoBackendPort) ?? asPositiveNumber(body.backendPort),
+            expoBackendStartCommand:
+                asNonEmptyString(body.expoBackendStartCommand) ?? asNonEmptyString(body.backendStartCommand) ?? undefined,
+            expoBackendHealthPath:
+                asNonEmptyString(body.expoBackendHealthPath) ?? asNonEmptyString(body.backendHealthPath) ?? undefined,
+            startExpoBackend: asBoolean(body.startExpoBackend, asBoolean(body.startBackend, true)),
+            backendDirectory: asNonEmptyString(body.backendDirectory) ?? undefined,
+            backendPort: asPositiveNumber(body.backendPort),
+            backendStartCommand: asNonEmptyString(body.backendStartCommand) ?? undefined,
+            backendHealthPath: asNonEmptyString(body.backendHealthPath) ?? undefined,
+            startBackend: asBoolean(body.startBackend, true),
+            injectExpoPublicRuntimeBackendUrl: asBoolean(body.injectExpoPublicRuntimeBackendUrl, false),
+            publicBaseUrl,
         });
 
         markProjectActivity(projectId, "dev-session/start");

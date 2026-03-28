@@ -17,7 +17,7 @@ function bearerToken(headerValue: string | undefined): string | null {
 const router = Router();
 
 router.post("/shopify-mobile/scaffold-expo", async (req: Request, res: Response) => {
-    const requiredToken = process.env.SHOPIFY_MOBILE_AI_SERVER_TOKEN?.trim();
+    const requiredToken = process.env.RUNNER_SERVER_TOKEN?.trim() || process.env.SHOPIFY_MOBILE_AI_SERVER_TOKEN?.trim();
     const token = bearerToken(req.headers.authorization);
 
     if (requiredToken && token !== requiredToken) {

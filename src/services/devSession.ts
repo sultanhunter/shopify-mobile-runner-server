@@ -10,6 +10,22 @@ const DEV_WORKSPACES_ROOT = "/var/shopify-mobile/dev-workspaces";
 const SHARED_PROJECTS_ROOT = "/var/shopify-mobile/projects";
 const LEGACY_DEV_WORKSPACES_ROOT = "/tmp/shopify-mobile-dev-workspaces";
 const EXPO_DEFAULT_PORT = 8081;
+const BACKEND_DEFAULT_PORT = Number(
+    process.env.SHOPIFY_MOBILE_EXPO_BACKEND_DEFAULT_PORT ?? process.env.SHOPIFY_MOBILE_BACKEND_DEFAULT_PORT ?? "4100",
+);
+const BACKEND_DEFAULT_HEALTH_PATH =
+    process.env.SHOPIFY_MOBILE_EXPO_BACKEND_HEALTH_PATH?.trim() ||
+    process.env.SHOPIFY_MOBILE_BACKEND_HEALTH_PATH?.trim() ||
+    "/api/health";
+const BACKEND_DEFAULT_START_COMMAND =
+    process.env.SHOPIFY_MOBILE_EXPO_BACKEND_START_COMMAND?.trim() ||
+    process.env.SHOPIFY_MOBILE_BACKEND_START_COMMAND?.trim() ||
+    "npm run dev";
+const BACKEND_HEALTH_TIMEOUT_MS = Number(
+    process.env.SHOPIFY_MOBILE_EXPO_BACKEND_HEALTH_TIMEOUT_MS ??
+        process.env.SHOPIFY_MOBILE_BACKEND_HEALTH_TIMEOUT_MS ??
+        "90000",
+);
 
 export type DevSessionStatus = "starting" | "ready" | "failed" | "stopped";
 
@@ -19,6 +35,19 @@ export interface StartDevSessionInput {
     branch?: string;
     install?: boolean;
     useTunnel?: boolean;
+    appDirectory?: string;
+    expoBackendDirectory?: string;
+    expoBackendPort?: number;
+    expoBackendStartCommand?: string;
+    expoBackendHealthPath?: string;
+    startExpoBackend?: boolean;
+    backendDirectory?: string;
+    backendPort?: number;
+    backendStartCommand?: string;
+    backendHealthPath?: string;
+    startBackend?: boolean;
+    injectExpoPublicRuntimeBackendUrl?: boolean;
+    publicBaseUrl?: string;
 }
 
 export interface ApplyAndPushInput {
@@ -41,8 +70,16 @@ export interface DevSessionPublic {
     installCommand: string;
     expoUrl?: string;
     webUrl?: string;
+    expoBackendStatus?: DevSessionStatus;
+    backendStatus?: DevSessionStatus;
+    expoBackendUrl?: string;
+    backendUrl?: string;
+    expoBackendPort?: number;
+    backendPort?: number;
     error?: string;
     logs: string[];
+    expoBackendLogs?: string[];
+    backendLogs?: string[];
 }
 
 interface PackageManagerInstallCommand {
@@ -63,11 +100,23 @@ interface DevSessionInternal {
     repoPath: string;
     packageManager: string;
     installCommand: string;
+    appDirectory: string;
+    backendDirectory: string;
+    backendPort: number;
+    backendStartCommand: string;
+    backendHealthPath: string;
+    startBackend: boolean;
+    injectExpoPublicRuntimeBackendUrl: boolean;
+    publicBaseUrl?: string;
     expoUrl?: string;
     webUrl?: string;
+    backendStatus: DevSessionStatus;
+    backendUrl?: string;
     error?: string;
     logs: string[];
+    backendLogs: string[];
     expoProcess?: ChildProcess;
+    backendProcess?: ChildProcess;
     webWarmupStatus?: "running" | "completed" | "failed";
     stopRequested?: boolean;
     expoUrlBackfillInFlight?: boolean;
@@ -107,6 +156,98 @@ function sanitizeProjectId(value: string): string {
     return cleaned.length > 0 ? cleaned.slice(0, 120) : "project";
 }
 
+function normalizeWorkspaceDir(value: string | undefined, fallback: string): string {
+    const trimmed = value?.trim();
+    if (!trimmed || trimmed === "." || trimmed === "./") {
+        return ".";
+    }
+
+    const normalized = trimmed.replace(/^\.\//, "").replace(/\\/g, "/").replace(/\/+$/g, "");
+    if (!normalized || normalized === "." || normalized.startsWith("../") || normalized.includes("/../")) {
+        return fallback;
+    }
+
+    return normalized;
+}
+
+function resolveRepoSubpath(repoPath: string, relativePath: string): string {
+    const normalized = normalizeWorkspaceDir(relativePath, ".");
+    if (normalized === ".") {
+        return repoPath;
+    }
+
+    const resolved = path.join(repoPath, normalized);
+    if (!resolved.startsWith(repoPath)) {
+        throw new Error(`Invalid repository path: ${relativePath}`);
+    }
+
+    return resolved;
+}
+
+function normalizeBackendPort(value: number | undefined): number {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 65535) {
+        return Number.isFinite(BACKEND_DEFAULT_PORT) && BACKEND_DEFAULT_PORT > 0 ? BACKEND_DEFAULT_PORT : 4100;
+    }
+
+    return Math.round(value);
+}
+
+function normalizeBackendHealthPath(value: string | undefined): string {
+    const trimmed = value?.trim();
+    if (!trimmed) {
+        return BACKEND_DEFAULT_HEALTH_PATH;
+    }
+
+    return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+
+function parseCommand(rawCommand: string): { command: string; args: string[] } {
+    const parts = rawCommand.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+    const normalized = parts.map((part) => part.replace(/^['"]|['"]$/g, "")).filter(Boolean);
+    if (normalized.length === 0) {
+        return { command: "npm", args: ["run", "dev"] };
+    }
+
+    return {
+        command: normalized[0],
+        args: normalized.slice(1),
+    };
+}
+
+function ensureTrailingSlash(value: string): string {
+    return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+function resolvePublicBaseUrl(session: DevSessionInternal): string | undefined {
+    const explicit = session.publicBaseUrl?.trim();
+    if (explicit) {
+        return ensureTrailingSlash(explicit);
+    }
+
+    const envBase =
+        process.env.SHOPIFY_MOBILE_RUNNER_PUBLIC_BASE_URL?.trim() ||
+        process.env.SHOPIFY_MOBILE_PUBLIC_BASE_URL?.trim();
+    if (envBase) {
+        return ensureTrailingSlash(envBase);
+    }
+
+    const port = Number(process.env.PORT ?? "8080");
+    if (Number.isFinite(port) && port > 0) {
+        return `http://127.0.0.1:${port}`;
+    }
+
+    return undefined;
+}
+
+function buildBackendProxyUrl(session: DevSessionInternal): string | undefined {
+    const baseUrl = resolvePublicBaseUrl(session);
+    if (!baseUrl) {
+        return undefined;
+    }
+
+    return `${baseUrl}/api/shopify-mobile/dev-session/${encodeURIComponent(session.id)}/expo-backend`;
+}
+
 function appendLog(session: DevSessionInternal, line: string) {
     const normalized = redactSecrets(line.replace(/\u001b\[[0-9;]*m/g, "").trimEnd());
     if (!normalized) return;
@@ -118,6 +259,20 @@ function appendLog(session: DevSessionInternal, line: string) {
 
     if (LOG_ERRORS_TO_STDOUT && (/\berror\b/i.test(normalized) || /\bfailed\b/i.test(normalized))) {
         console.warn(`[DEV_SESSION][${session.id}] ${normalized}`);
+    }
+}
+
+function appendBackendLog(session: DevSessionInternal, line: string) {
+    const normalized = redactSecrets(line.replace(/\u001b\[[0-9;]*m/g, "").trimEnd());
+    if (!normalized) return;
+
+    session.backendLogs.push(`${new Date().toISOString()} ${normalized}`);
+    if (session.backendLogs.length > DEFAULT_LOG_LIMIT) {
+        session.backendLogs = session.backendLogs.slice(session.backendLogs.length - DEFAULT_LOG_LIMIT);
+    }
+
+    if (LOG_ERRORS_TO_STDOUT && (/\berror\b/i.test(normalized) || /\bfailed\b/i.test(normalized))) {
+        console.warn(`[DEV_SESSION_BACKEND][${session.id}] ${normalized}`);
     }
 }
 
@@ -150,8 +305,16 @@ function toPublicSession(session: DevSessionInternal, logLines: number): DevSess
         installCommand: session.installCommand,
         expoUrl: session.expoUrl,
         webUrl: session.webUrl,
+        expoBackendStatus: session.startBackend ? session.backendStatus : undefined,
+        backendStatus: session.startBackend ? session.backendStatus : undefined,
+        expoBackendUrl: session.backendUrl,
+        backendUrl: session.backendUrl,
+        expoBackendPort: session.backendPort,
+        backendPort: session.backendPort,
         error: session.error,
         logs: session.logs.slice(-safeLogLines),
+        expoBackendLogs: session.backendLogs.slice(-safeLogLines),
+        backendLogs: session.backendLogs.slice(-safeLogLines),
     };
 }
 
@@ -410,6 +573,35 @@ async function cleanupResidualExpoProcesses(session: DevSessionInternal): Promis
     }
 }
 
+function isManagedBackendCommand(command: string): boolean {
+    const normalized = command.toLowerCase();
+    const looksLikeNode = normalized.includes(" node") || normalized.includes(" npm") || normalized.includes("tsx");
+    const inKnownWorkspace =
+        normalized.includes(DEV_WORKSPACES_ROOT.toLowerCase()) ||
+        normalized.includes(SHARED_PROJECTS_ROOT.toLowerCase()) ||
+        normalized.includes(LEGACY_DEV_WORKSPACES_ROOT.toLowerCase());
+
+    return looksLikeNode && inKnownWorkspace;
+}
+
+async function cleanupResidualBackendProcesses(session: DevSessionInternal): Promise<void> {
+    if (!session.startBackend) {
+        return;
+    }
+
+    const pids = await listListeningPidsOnPort(session.backendPort);
+    if (pids.length === 0) {
+        return;
+    }
+
+    for (const pid of pids) {
+        const command = await readProcessCommand(pid);
+        const label = isManagedBackendCommand(command) ? "managed expo backend process" : "process";
+        appendBackendLog(session, `Stopping stale ${label} pid=${pid} on port ${session.backendPort}.`);
+        await terminateExternalProcess(pid);
+    }
+}
+
 function extractExpoUrl(line: string): string | undefined {
     const exp = line.match(/(exp:\/\/[\w\-./?=&%:+]+)/);
     if (exp?.[1]) return exp[1];
@@ -537,6 +729,42 @@ function triggerExpoUrlBackfill(session: DevSessionInternal) {
     })();
 }
 
+function isMobileReady(session: DevSessionInternal): boolean {
+    return Boolean(session.expoUrl || session.webUrl);
+}
+
+function isBackendReady(session: DevSessionInternal): boolean {
+    if (!session.startBackend) {
+        return true;
+    }
+
+    return session.backendStatus === "ready";
+}
+
+function maybeMarkSessionReady(session: DevSessionInternal) {
+    if (session.status !== "starting") {
+        return;
+    }
+
+    if (!isMobileReady(session) || !isBackendReady(session)) {
+        return;
+    }
+
+    updateSession(session, { status: "ready" });
+    appendLog(session, "Dev session is ready.");
+    if (session.startBackend) {
+        appendBackendLog(session, `Expo backend is ready at ${session.backendUrl ?? `http://127.0.0.1:${session.backendPort}`}.`);
+    }
+    logSessionEvent(
+        session,
+        `ready expoUrl=${session.expoUrl ?? "n/a"} webUrl=${session.webUrl ?? "n/a"} backendUrl=${session.backendUrl ?? "n/a"}`,
+    );
+
+    if (ENABLE_WEB_WARMUP && session.webUrl && !session.webWarmupStatus) {
+        void warmupWebPreview(session);
+    }
+}
+
 function tryMarkReadyFromLine(session: DevSessionInternal, line: string) {
   const expoUrl = extractExpoUrl(line);
   if (expoUrl && !session.expoUrl) {
@@ -548,19 +776,11 @@ function tryMarkReadyFromLine(session: DevSessionInternal, line: string) {
         updateSession(session, { webUrl });
     }
 
-    if ((session.expoUrl || session.webUrl) && session.status === "starting") {
-        updateSession(session, { status: "ready" });
-        appendLog(session, "Dev session is ready.");
-        logSessionEvent(session, `ready expoUrl=${session.expoUrl ?? "n/a"} webUrl=${session.webUrl ?? "n/a"}`);
-
-        if (!session.expoUrl) {
-            triggerExpoUrlBackfill(session);
-        }
-
-        if (ENABLE_WEB_WARMUP && session.webUrl && !session.webWarmupStatus) {
-            void warmupWebPreview(session);
-        }
+    if ((session.expoUrl || session.webUrl) && !session.expoUrl) {
+        triggerExpoUrlBackfill(session);
     }
+
+    maybeMarkSessionReady(session);
 
     if (!session.expoUrl && line.toLowerCase().includes("tunnel ready")) {
         triggerExpoUrlBackfill(session);
@@ -580,15 +800,21 @@ function shouldFallbackFromTunnel(session: DevSessionInternal): boolean {
     );
 }
 
-function launchExpoProcess(session: DevSessionInternal, useTunnel: boolean) {
+function launchExpoProcess(
+    session: DevSessionInternal,
+    useTunnel: boolean,
+    appPath: string,
+    extraEnv?: NodeJS.ProcessEnv,
+) {
     const expoArgs = getExpoStartArgs(useTunnel);
     appendLog(session, `$ npx ${expoArgs.join(" ")}`);
 
     const child = spawn("npx", expoArgs, {
-        cwd: session.repoPath,
+        cwd: appPath,
         env: {
             ...process.env,
             NODE_ENV: "development",
+            ...extraEnv,
         },
         detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
@@ -600,10 +826,14 @@ function launchExpoProcess(session: DevSessionInternal, useTunnel: boolean) {
     });
 
     if (child.stdout) {
-        listenStream(session, child.stdout, "expo");
+        listenStream(session, child.stdout, "expo", (line) => {
+            tryMarkReadyFromLine(session, line);
+        });
     }
     if (child.stderr) {
-        listenStream(session, child.stderr, "expo-error");
+        listenStream(session, child.stderr, "expo-error", (line) => {
+            tryMarkReadyFromLine(session, line);
+        });
     }
 
     child.on("exit", (code, signal) => {
@@ -631,7 +861,7 @@ function launchExpoProcess(session: DevSessionInternal, useTunnel: boolean) {
                 expoUrlBackfillAttempts: 0,
                 tunnelFallbackAttempted: true,
             });
-            launchExpoProcess(active, false);
+            launchExpoProcess(active, false, appPath, extraEnv);
             return;
         }
 
@@ -642,7 +872,140 @@ function launchExpoProcess(session: DevSessionInternal, useTunnel: boolean) {
             status: "failed",
             error: message,
         });
+        void stopBackendProcess(active);
     });
+}
+
+async function waitForBackendHealth(session: DevSessionInternal): Promise<boolean> {
+    const timeoutMs = Number.isFinite(BACKEND_HEALTH_TIMEOUT_MS) && BACKEND_HEALTH_TIMEOUT_MS > 0
+        ? BACKEND_HEALTH_TIMEOUT_MS
+        : 90000;
+    const startedAt = Date.now();
+    const healthUrl = `http://127.0.0.1:${session.backendPort}${session.backendHealthPath}`;
+
+    while (Date.now() - startedAt < timeoutMs) {
+        if (isStopRequested(session) || session.status === "failed" || session.backendStatus === "failed") {
+            return false;
+        }
+
+        try {
+            const response = await fetch(healthUrl, {
+                method: "GET",
+                headers: { Accept: "application/json" },
+            });
+
+            if (response.ok) {
+                return true;
+            }
+        } catch {
+            // Keep polling until timeout.
+        }
+
+        await delay(1000);
+    }
+
+    return false;
+}
+
+async function startBackendProcess(session: DevSessionInternal, backendPath: string): Promise<void> {
+    if (!session.startBackend) {
+        return;
+    }
+
+    const packageJsonPath = path.join(backendPath, "package.json");
+    const hasPackageJson = await pathExists(packageJsonPath);
+    if (!hasPackageJson) {
+        const message = `Expo backend package.json was not found at ${backendPath}.`;
+        appendBackendLog(session, message);
+        updateSession(session, {
+            backendStatus: "failed",
+            status: "failed",
+            error: message,
+        });
+        return;
+    }
+
+    const parsed = parseCommand(session.backendStartCommand);
+    appendBackendLog(session, `$ ${parsed.command} ${parsed.args.join(" ")}`);
+
+    const child = spawn(parsed.command, parsed.args, {
+        cwd: backendPath,
+        env: {
+            ...process.env,
+            NODE_ENV: "development",
+            PORT: String(session.backendPort),
+        },
+        detached: process.platform !== "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    updateSession(session, {
+        backendProcess: child,
+        backendStatus: "starting",
+    });
+
+    if (child.stdout) {
+        listenStream(session, child.stdout, "backend", undefined, { backend: true });
+    }
+    if (child.stderr) {
+        listenStream(session, child.stderr, "backend-error", undefined, { backend: true });
+    }
+
+    child.on("exit", (code, signal) => {
+        const active = sessions.get(session.id);
+        if (!active) {
+            return;
+        }
+
+        updateSession(active, {
+            backendProcess: undefined,
+        });
+
+        if (active.status === "stopped" || active.stopRequested) {
+            appendBackendLog(active, `Expo backend process exited after stop (code=${code}, signal=${signal}).`);
+            return;
+        }
+
+        const message = `Expo backend process exited unexpectedly (code=${code}, signal=${signal}).`;
+        appendBackendLog(active, message);
+        updateSession(active, {
+            backendStatus: "failed",
+            status: "failed",
+            error: message,
+        });
+        void stopExpoProcess(active);
+    });
+
+    const healthy = await waitForBackendHealth(session);
+    if (!healthy) {
+        const timeoutSeconds = timeoutMsToSeconds(timeoutMsFallback());
+        const message = `Expo backend did not pass health check at ${session.backendHealthPath} within ${timeoutSeconds}s.`;
+        appendBackendLog(session, message);
+        updateSession(session, {
+            backendStatus: "failed",
+            status: "failed",
+            error: message,
+        });
+        await stopBackendProcess(session);
+        return;
+    }
+
+    updateSession(session, {
+        backendStatus: "ready",
+    });
+    appendBackendLog(session, `Expo backend health check passed on port ${session.backendPort}.`);
+    maybeMarkSessionReady(session);
+}
+
+function timeoutMsFallback(): number {
+    const timeoutMs = Number.isFinite(BACKEND_HEALTH_TIMEOUT_MS) && BACKEND_HEALTH_TIMEOUT_MS > 0
+        ? BACKEND_HEALTH_TIMEOUT_MS
+        : 90000;
+    return timeoutMs;
+}
+
+function timeoutMsToSeconds(timeoutMs: number): number {
+    return Math.max(1, Math.round(timeoutMs / 1000));
 }
 
 async function warmupWebPreview(session: DevSessionInternal) {
@@ -696,8 +1059,15 @@ async function warmupWebPreview(session: DevSessionInternal) {
   }
 }
 
-function listenStream(session: DevSessionInternal, stream: NodeJS.ReadableStream, prefix: string) {
+function listenStream(
+    session: DevSessionInternal,
+    stream: NodeJS.ReadableStream,
+    prefix: string,
+    onLine?: (line: string) => void,
+    options?: { backend?: boolean },
+) {
     let buffer = "";
+    const write = options?.backend ? appendBackendLog : appendLog;
 
     stream.on("data", (chunk) => {
         buffer += chunk.toString();
@@ -706,16 +1076,16 @@ function listenStream(session: DevSessionInternal, stream: NodeJS.ReadableStream
 
         for (const line of lines) {
             const decorated = `[${prefix}] ${line}`;
-            appendLog(session, decorated);
-            tryMarkReadyFromLine(session, line);
+            write(session, decorated);
+            onLine?.(line);
         }
     });
 
     stream.on("end", () => {
         if (!buffer) return;
         const decorated = `[${prefix}] ${buffer}`;
-        appendLog(session, decorated);
-        tryMarkReadyFromLine(session, buffer);
+        write(session, decorated);
+        onLine?.(buffer);
         buffer = "";
     });
 }
@@ -780,8 +1150,11 @@ async function ensureNgrokAvailable(session: DevSessionInternal): Promise<boolea
 
 async function bootstrapSession(session: DevSessionInternal, input: StartDevSessionInput) {
     const timeoutMs = Number(process.env.SHOPIFY_MOBILE_DEV_TIMEOUT_MS ?? "900000");
+    const appPath = resolveRepoSubpath(session.repoPath, session.appDirectory);
+    const backendPath = resolveRepoSubpath(session.repoPath, session.backendDirectory);
 
     await cleanupResidualExpoProcesses(session);
+    await cleanupResidualBackendProcesses(session);
     await ensureRepoForDevSession(session, input, timeoutMs);
 
     if (isStopRequested(session)) {
@@ -790,18 +1163,37 @@ async function bootstrapSession(session: DevSessionInternal, input: StartDevSess
         return;
     }
 
-    const installCommand = await detectInstallCommand(session.repoPath);
+    const installCommand = await detectInstallCommand(appPath);
+    const installCommandLabelParts = [`${installCommand.command} ${installCommand.args.join(" ")} @ ${session.appDirectory}`];
+
+    const shouldInstallBackendDeps =
+        session.startBackend && backendPath !== appPath && (await pathExists(path.join(backendPath, "package.json")));
+
+    let backendInstallCommand: PackageManagerInstallCommand | undefined;
+    if (shouldInstallBackendDeps) {
+        backendInstallCommand = await detectInstallCommand(backendPath);
+        installCommandLabelParts.push(`${backendInstallCommand.command} ${backendInstallCommand.args.join(" ")} @ ${session.backendDirectory}`);
+    }
+
     updateSession(session, {
         packageManager: installCommand.packageManager,
-        installCommand: `${installCommand.command} ${installCommand.args.join(" ")}`,
+        installCommand: installCommandLabelParts.join(" | "),
     });
 
     if (input.install !== false) {
         await runExec(session, installCommand.command, installCommand.args, {
-            cwd: session.repoPath,
+            cwd: appPath,
             timeoutMs,
             env: getPackageInstallEnv(),
         });
+
+        if (backendInstallCommand) {
+            await runExec(session, backendInstallCommand.command, backendInstallCommand.args, {
+                cwd: backendPath,
+                timeoutMs,
+                env: getPackageInstallEnv(),
+            });
+        }
     }
 
     if (isStopRequested(session)) {
@@ -827,7 +1219,27 @@ async function bootstrapSession(session: DevSessionInternal, input: StartDevSess
         return;
     }
 
-    launchExpoProcess(session, shouldUseTunnel);
+    let expoEnv: NodeJS.ProcessEnv | undefined;
+    if (session.startBackend) {
+        await startBackendProcess(session, backendPath);
+        if (session.status === "failed") {
+            return;
+        }
+
+        if (session.injectExpoPublicRuntimeBackendUrl && session.backendUrl) {
+            expoEnv = {
+                EXPO_PUBLIC_RUNTIME_BACKEND_URL: session.backendUrl,
+            };
+        }
+    }
+
+    if (isStopRequested(session)) {
+        appendLog(session, "Stop requested during bootstrap. Aborting before Expo launch.");
+        logSessionEvent(session, "bootstrap aborted after backend startup due to stop request");
+        return;
+    }
+
+    launchExpoProcess(session, shouldUseTunnel, appPath, expoEnv);
 }
 
 function sanitizeRelativePath(filePath: string): string {
@@ -897,18 +1309,60 @@ async function stopExpoProcess(session: DevSessionInternal) {
     });
 }
 
+async function stopBackendProcess(session: DevSessionInternal) {
+    const processRef = session.backendProcess;
+    if (!processRef) return;
+
+    const killProcess = (signal: NodeJS.Signals) => {
+        const pid = processRef.pid;
+
+        if (process.platform !== "win32" && typeof pid === "number") {
+            try {
+                process.kill(-pid, signal);
+                return;
+            } catch {
+                // Fall back to direct child kill below.
+            }
+        }
+
+        try {
+            processRef.kill(signal);
+        } catch {
+            // Ignore if process already exited.
+        }
+    };
+
+    killProcess("SIGTERM");
+
+    await new Promise<void>((resolve) => {
+        const timeout = setTimeout(() => {
+            killProcess("SIGKILL");
+            resolve();
+        }, 5000);
+
+        processRef.once("exit", () => {
+            clearTimeout(timeout);
+            resolve();
+        });
+    });
+}
+
 async function stopSessionInternal(session: DevSessionInternal, reason: string, source: "api" | "auto") {
     updateSession(session, {
         stopRequested: true,
     });
 
+    await stopBackendProcess(session);
     await stopExpoProcess(session);
     updateSession(session, {
         status: "stopped",
+        backendStatus: "stopped",
         error: undefined,
         expoProcess: undefined,
+        backendProcess: undefined,
         expoUrl: undefined,
         webUrl: undefined,
+        backendUrl: undefined,
         expoUrlBackfillInFlight: false,
         expoUrlBackfillAttempts: 0,
         expoStartedWithTunnel: false,
@@ -977,12 +1431,28 @@ export function getDevSessionProxyTarget(sessionId: string): string | null {
     return normalizeProxyTarget(session.webUrl);
 }
 
+export function getDevSessionBackendProxyTarget(sessionId: string): string | null {
+    const session = sessions.get(sessionId);
+    if (!session || !session.startBackend || session.backendStatus === "stopped") {
+        return null;
+    }
+
+    return `http://127.0.0.1:${session.backendPort}`;
+}
+
 export async function startDevSession(input: StartDevSessionInput): Promise<DevSessionPublic> {
     await stopAllActiveSessions("A new dev session was started.");
 
     const createdAt = nowIso();
     const id = randomUUID();
     const branch = input.branch?.trim() || "main";
+    const appDirectory = normalizeWorkspaceDir(input.appDirectory, ".");
+    const expoBackendDirectory = normalizeWorkspaceDir(input.expoBackendDirectory ?? input.backendDirectory, "expo-backend");
+    const expoBackendPort = normalizeBackendPort(input.expoBackendPort ?? input.backendPort);
+    const expoBackendStartCommand =
+        input.expoBackendStartCommand?.trim() || input.backendStartCommand?.trim() || BACKEND_DEFAULT_START_COMMAND;
+    const expoBackendHealthPath = normalizeBackendHealthPath(input.expoBackendHealthPath ?? input.backendHealthPath);
+    const startExpoBackend = (input.startExpoBackend ?? input.startBackend) !== false;
     const workspacePath = path.join(SHARED_PROJECTS_ROOT, sanitizeProjectId(input.projectId));
     const repoPath = path.join(workspacePath, "repo");
 
@@ -998,7 +1468,18 @@ export async function startDevSession(input: StartDevSessionInput): Promise<DevS
         repoPath,
         packageManager: "unknown",
         installCommand: "pending",
+        appDirectory,
+        backendDirectory: expoBackendDirectory,
+        backendPort: expoBackendPort,
+        backendStartCommand: expoBackendStartCommand,
+        backendHealthPath: expoBackendHealthPath,
+        startBackend: startExpoBackend,
+        injectExpoPublicRuntimeBackendUrl: input.injectExpoPublicRuntimeBackendUrl === true,
+        publicBaseUrl: input.publicBaseUrl?.trim() || undefined,
+        backendStatus: startExpoBackend ? "starting" : "stopped",
+        backendUrl: undefined,
         logs: [],
+        backendLogs: [],
         stopRequested: false,
         expoUrlBackfillInFlight: false,
         expoUrlBackfillAttempts: 0,
@@ -1006,9 +1487,14 @@ export async function startDevSession(input: StartDevSessionInput): Promise<DevS
         tunnelFallbackAttempted: false,
     };
 
+    session.backendUrl = buildBackendProxyUrl(session);
+
     sessions.set(id, session);
     appendLog(session, "Starting dev session bootstrap...");
-    logSessionEvent(session, `created branch=${branch} install=${input.install !== false} useTunnel=${input.useTunnel !== false}`);
+    logSessionEvent(
+        session,
+        `created branch=${branch} install=${input.install !== false} useTunnel=${input.useTunnel !== false} appDir=${appDirectory} expoBackendDir=${expoBackendDirectory} expoBackendEnabled=${startExpoBackend}`,
+    );
 
     void bootstrapSession(session, input)
         .then(() => {
@@ -1023,8 +1509,11 @@ export async function startDevSession(input: StartDevSessionInput): Promise<DevS
             logSessionEvent(session, `startup failed: ${message}`);
             updateSession(session, {
                 status: "failed",
+                backendStatus: session.startBackend ? "failed" : session.backendStatus,
                 error: message,
             });
+            void stopExpoProcess(session);
+            void stopBackendProcess(session);
         });
 
     return toPublicSession(session, 200);

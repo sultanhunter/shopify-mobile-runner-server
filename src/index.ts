@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import cors from "cors";
 import express from "express";
 import devSessionRoutes from "./routes/devSession.js";
+import devSessionProxyRoutes from "./routes/devSessionProxy.js";
 import expoScaffoldRoutes from "./routes/expoScaffold.js";
 import repoWorkspaceRoutes from "./routes/repoWorkspace.js";
 import shopifyMobileAiRoutes from "./routes/shopifyMobileAi.js";
@@ -83,6 +84,7 @@ app.get("/", (req, res) => {
 app.use("/api", shopifyMobileAiRoutes);
 app.use("/api", expoScaffoldRoutes);
 app.use("/api", devSessionRoutes);
+app.use("/api", devSessionProxyRoutes);
 app.use("/api", taskRoutes);
 app.use("/api", repoWorkspaceRoutes);
 

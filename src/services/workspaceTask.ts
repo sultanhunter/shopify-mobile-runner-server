@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { collectExpoProjectFiles, scaffoldExpoProjectToDirectory } from "./expoScaffold.js";
@@ -12,6 +12,13 @@ const PROJECTS_ROOT = "/var/shopify-mobile/projects";
 interface CreateWorkspaceInput {
     name: string;
     sdk: string;
+    workspaceLayout?: {
+        mobileAppDir?: string;
+        expoBackendDir?: string;
+        expoBackendPort?: number;
+        backendDir?: string;
+        backendPort?: number;
+    };
 }
 
 interface GithubState {
@@ -26,6 +33,16 @@ interface GithubState {
     error?: string;
 }
 
+interface WorkspaceLayout {
+    mobileAppDir: string;
+    expoBackendDir: string;
+    expoBackendPort: number;
+    expoBackendStartCommand: string;
+    backendDir: string;
+    backendPort: number;
+    backendStartCommand: string;
+}
+
 function toSlug(value: string): string {
     const normalized = value
         .trim()
@@ -35,6 +52,50 @@ function toSlug(value: string): string {
         .slice(0, 42);
 
     return normalized || "shopify-mobile-app";
+}
+
+function normalizeWorkspaceDir(value: string | undefined, fallback: string): string {
+    const trimmed = value?.trim();
+    if (!trimmed || trimmed === "." || trimmed === "./") {
+        return ".";
+    }
+
+    const normalized = trimmed.replace(/^\.\//, "").replace(/\\/g, "/").replace(/\/+$/g, "");
+    if (!normalized || normalized === "." || normalized.startsWith("../") || normalized.includes("/../")) {
+        return fallback;
+    }
+
+    return normalized;
+}
+
+function resolveWorkspaceLayout(input: CreateWorkspaceInput): WorkspaceLayout {
+    const raw = input.workspaceLayout;
+    const mobileAppDir = normalizeWorkspaceDir(raw?.mobileAppDir, "mobile");
+    const backendDirRaw = normalizeWorkspaceDir(raw?.expoBackendDir ?? raw?.backendDir, "expo-backend");
+    const backendDir = backendDirRaw === "." ? "expo-backend" : backendDirRaw;
+    const backendPortRaw = raw?.expoBackendPort ?? raw?.backendPort;
+    const backendPort =
+        typeof backendPortRaw === "number" && Number.isFinite(backendPortRaw) && backendPortRaw > 0
+            ? Math.round(backendPortRaw)
+            : 4100;
+
+    return {
+        mobileAppDir,
+        expoBackendDir: backendDir,
+        expoBackendPort: backendPort,
+        expoBackendStartCommand: "npm run dev",
+        backendDir,
+        backendPort,
+        backendStartCommand: "npm run dev",
+    };
+}
+
+function toWorkspacePath(root: string, filePath: string): string {
+    if (root === ".") {
+        return filePath;
+    }
+
+    return path.join(root, filePath);
 }
 
 function buildPreview(projectName: string) {
@@ -237,8 +298,61 @@ function initialGithubState(): GithubState {
     };
 }
 
+async function scaffoldRuntimeBackendStarter(repoPath: string, layout: WorkspaceLayout): Promise<void> {
+    const backendRoot = toWorkspacePath(repoPath, layout.expoBackendDir);
+    await mkdir(path.join(backendRoot, "src"), { recursive: true });
+
+    const packageJson = {
+        name: "workspace-expo-backend",
+        private: true,
+        type: "module",
+        scripts: {
+            dev: "node --watch src/index.js",
+            start: "node src/index.js",
+        },
+        dependencies: {
+            cors: "^2.8.5",
+            dotenv: "^16.4.5",
+            express: "^4.19.2",
+        },
+    };
+
+    const indexJs = `import cors from "cors";
+import dotenv from "dotenv";
+import express from "express";
+
+dotenv.config();
+
+const app = express();
+const port = Number(process.env.PORT || "${layout.expoBackendPort}");
+
+app.use(cors({ origin: true }));
+app.use(express.json());
+
+app.get("/api/health", (_request, response) => {
+  response.json({ status: "ok", service: "workspace-expo-backend" });
+});
+
+app.listen(port, () => {
+  console.log("Expo backend listening on port", port);
+});
+`;
+
+    const envExample = `PORT=${layout.expoBackendPort}
+`;
+
+    await writeFile(path.join(backendRoot, "package.json"), JSON.stringify(packageJson, null, 2), "utf8");
+    await writeFile(path.join(backendRoot, "src/index.js"), indexJs, "utf8");
+    await writeFile(path.join(backendRoot, ".env.example"), envExample, "utf8");
+    await writeFile(path.join(backendRoot, ".gitignore"), "node_modules/\n.env\n", "utf8");
+}
+
 async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInput): Promise<void> {
-    console.log(`[TASK ${taskId}] workspace.create queued name=${input.name} sdk=${input.sdk}`);
+    const workspaceLayout = resolveWorkspaceLayout(input);
+
+    console.log(
+        `[TASK ${taskId}] workspace.create queued name=${input.name} sdk=${input.sdk} mobileDir=${workspaceLayout.mobileAppDir} expoBackendDir=${workspaceLayout.expoBackendDir}`,
+    );
     await updateWorkspaceTask(taskId, { status: "running", error: null });
     console.log(`[TASK ${taskId}] status=running`);
 
@@ -264,6 +378,7 @@ async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInpu
             },
         ],
         runs: [],
+        workspaceLayout,
         github: initialGithubState(),
     };
 
@@ -272,11 +387,16 @@ async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInpu
     console.log(`[TASK ${taskId}] project row inserted id=${projectId}`);
 
     await mkdir(workspacePath, { recursive: true });
+    const mobileTargetDir = toWorkspacePath(repoPath, workspaceLayout.mobileAppDir);
+
     const scaffold = await scaffoldExpoProjectToDirectory({
         projectName: input.name,
         sdk: input.sdk,
-        targetDir: repoPath,
+        targetDir: mobileTargetDir,
     });
+
+    await scaffoldRuntimeBackendStarter(repoPath, workspaceLayout);
+
     const collected = await collectExpoProjectFiles(repoPath);
     console.log(`[TASK ${taskId}] scaffold generated sdk=${scaffold.sdk} files=${Object.keys(collected.files).length}`);
 
@@ -291,6 +411,12 @@ async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInpu
                 id: randomUUID(),
                 role: "system",
                 content: "Project initialized. This workspace now contains a clean Expo starter project.",
+                createdAt: updatedAtAfterScaffold,
+            },
+            {
+                id: randomUUID(),
+                role: "assistant",
+                content: `Workspace layout ready: mobile app in ${workspaceLayout.mobileAppDir}/ and expo backend in ${workspaceLayout.expoBackendDir}/.`,
                 createdAt: updatedAtAfterScaffold,
             },
             {
@@ -366,6 +492,7 @@ async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInpu
         result: {
             projectId,
             expoSdk: scaffold.sdk,
+            workspaceLayout,
         },
         error: null,
     });
@@ -381,6 +508,7 @@ export async function enqueueCreateWorkspaceTask(input: CreateWorkspaceInput): P
         payload: {
             name: input.name,
             sdk: input.sdk,
+            workspaceLayout: input.workspaceLayout,
         },
     });
 
