@@ -15,6 +15,11 @@ interface TaskRow {
     updated_at: string;
 }
 
+interface ProjectRow {
+    id: string;
+    project: Record<string, unknown>;
+}
+
 let cachedClient: SupabaseClient | null = null;
 
 function requiredEnv(name: string): string {
@@ -113,4 +118,22 @@ export async function upsertProject(project: Record<string, unknown>): Promise<v
     if (error) {
         throw new Error(`Failed to save project: ${error.message}`);
     }
+}
+
+export async function getProjectById(projectId: string): Promise<Record<string, unknown> | null> {
+    const { data, error } = await getClient()
+        .from(getProjectsTableName())
+        .select("id,project")
+        .eq("id", projectId)
+        .maybeSingle<ProjectRow>();
+
+    if (error) {
+        throw new Error(`Failed to fetch project ${projectId}: ${error.message}`);
+    }
+
+    if (!data?.project || typeof data.project !== "object") {
+        return null;
+    }
+
+    return data.project;
 }

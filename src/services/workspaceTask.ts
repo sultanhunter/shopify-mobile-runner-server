@@ -4,7 +4,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { collectExpoProjectFiles, scaffoldExpoProjectToDirectory } from "./expoScaffold.js";
-import { insertWorkspaceTask, updateWorkspaceTask, upsertProject } from "./supabase.js";
+import { getProjectById, insertWorkspaceTask, updateWorkspaceTask, upsertProject } from "./supabase.js";
 
 const execFileAsync = promisify(execFile);
 const PROJECTS_ROOT = "/var/shopify-mobile/projects";
@@ -32,6 +32,13 @@ interface GithubState {
     lastCommitMessage?: string;
     lastSyncedAt?: string;
     error?: string;
+}
+
+interface ProjectLike {
+    [key: string]: unknown;
+    id: string;
+    updatedAt: string;
+    github: GithubState;
 }
 
 interface WorkspaceLayout {
@@ -299,6 +306,14 @@ function initialGithubState(): GithubState {
     };
 }
 
+function mergeGithubState(existing: unknown, next: GithubState): GithubState {
+    const base = existing && typeof existing === "object" ? (existing as Partial<GithubState>) : {};
+    return {
+        ...base,
+        ...next,
+    };
+}
+
 async function scaffoldRuntimeBackendStarter(repoPath: string, layout: WorkspaceLayout): Promise<void> {
     const backendRoot = toWorkspacePath(repoPath, layout.expoBackendDir);
     await mkdir(path.join(backendRoot, "src"), { recursive: true });
@@ -491,10 +506,13 @@ async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInpu
         }
     }
 
+    const latestProject = (await getProjectById(projectId).catch(() => null)) as ProjectLike | null;
     const finalizedProject = {
-        ...projectAfterScaffold,
+        ...(latestProject ?? projectAfterScaffold),
+        expoSdk: scaffold.sdk,
+        workspaceLayout: (latestProject as Record<string, unknown> | null)?.workspaceLayout ?? workspaceLayout,
         updatedAt: new Date().toISOString(),
-        github,
+        github: mergeGithubState((latestProject as Record<string, unknown> | null)?.github, github),
     };
 
     await upsertProject(finalizedProject);
