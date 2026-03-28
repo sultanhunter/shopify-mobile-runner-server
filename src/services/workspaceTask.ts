@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { collectExpoProjectFiles, scaffoldExpoProjectToDirectory } from "./expoScaffold.js";
@@ -395,6 +395,8 @@ async function runCreateWorkspaceTask(taskId: string, input: CreateWorkspaceInpu
         sdk: input.sdk,
         targetDir: mobileTargetDir,
     });
+
+    await rm(path.join(mobileTargetDir, ".git"), { recursive: true, force: true });
 
     await scaffoldRuntimeBackendStarter(repoPath, workspaceLayout);
 
