@@ -11,6 +11,7 @@ import { markProjectActivity } from "../services/activityTracker.js";
 interface StartDevSessionBody {
     projectId?: unknown;
     repoUrl?: unknown;
+    controlPlaneBaseUrl?: unknown;
     branch?: unknown;
     install?: unknown;
     useTunnel?: unknown;
@@ -112,6 +113,7 @@ router.post("/shopify-mobile/dev-session/start", async (req: Request, res: Respo
         const session = await startDevSession({
             projectId,
             repoUrl,
+            controlPlaneBaseUrl: asNonEmptyString(body.controlPlaneBaseUrl) ?? undefined,
             branch,
             install: asBoolean(body.install, true),
             useTunnel: asBoolean(body.useTunnel, true),

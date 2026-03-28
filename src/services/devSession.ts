@@ -32,6 +32,7 @@ export type DevSessionStatus = "starting" | "ready" | "failed" | "stopped";
 export interface StartDevSessionInput {
     projectId: string;
     repoUrl: string;
+    controlPlaneBaseUrl?: string;
     branch?: string;
     install?: boolean;
     useTunnel?: boolean;
@@ -108,6 +109,7 @@ interface DevSessionInternal {
     startBackend: boolean;
     injectExpoPublicRuntimeBackendUrl: boolean;
     publicBaseUrl?: string;
+    controlPlaneBaseUrl?: string;
     expoUrl?: string;
     webUrl?: string;
     backendStatus: DevSessionStatus;
@@ -955,6 +957,10 @@ async function startBackendProcess(session: DevSessionInternal, backendPath: str
 
     const parsed = parseCommand(session.backendStartCommand);
     appendBackendLog(session, `$ ${parsed.command} ${parsed.args.join(" ")}`);
+    appendBackendLog(
+        session,
+        `Boot config PROJECT_ID=${session.projectId} CONTROL_PLANE_BASE_URL=${session.controlPlaneBaseUrl ?? "<from backend defaults>"}`,
+    );
 
     const child = spawn(parsed.command, parsed.args, {
         cwd: backendPath,
@@ -962,6 +968,10 @@ async function startBackendProcess(session: DevSessionInternal, backendPath: str
             ...process.env,
             NODE_ENV: "development",
             PORT: String(session.backendPort),
+            PROJECT_ID: session.projectId,
+            ...(session.controlPlaneBaseUrl
+                ? { CONTROL_PLANE_BASE_URL: session.controlPlaneBaseUrl }
+                : {}),
         },
         detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
@@ -1504,6 +1514,7 @@ export async function startDevSession(input: StartDevSessionInput): Promise<DevS
         startBackend: startExpoBackend,
         injectExpoPublicRuntimeBackendUrl: input.injectExpoPublicRuntimeBackendUrl === true,
         publicBaseUrl: input.publicBaseUrl?.trim() || undefined,
+        controlPlaneBaseUrl: input.controlPlaneBaseUrl?.trim() || undefined,
         backendStatus: startExpoBackend ? "starting" : "stopped",
         backendUrl: undefined,
         logs: [],
