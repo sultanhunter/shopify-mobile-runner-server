@@ -4,6 +4,7 @@ import {
     exploreRuntimeDatabase,
     getRuntimeAdminDatabaseTarget,
     provisionRuntimeDatabase,
+    upsertRuntimeStateInProjectDatabase,
 } from "../services/runtimeDatabase.js";
 
 interface ProvisionRuntimeDatabaseBody {
@@ -14,6 +15,13 @@ interface ExploreRuntimeDatabaseBody {
     databaseUrl?: unknown;
     table?: unknown;
     limit?: unknown;
+}
+
+interface RuntimeStateUpsertBody {
+    databaseUrl?: unknown;
+    version?: unknown;
+    config?: unknown;
+    secrets?: unknown;
 }
 
 function asNonEmptyString(value: unknown): string | null {
@@ -121,6 +129,45 @@ router.post("/shopify-mobile/runtime-db/explore", async (req: Request, res: Resp
             error instanceof Error && error.message.trim().length > 0
                 ? error.message.trim()
                 : "Failed to explore runtime database.";
+
+        return res.status(500).json({ error: message });
+    }
+});
+
+router.post("/shopify-mobile/runtime-db/state-upsert", async (req: Request, res: Response) => {
+    if (!authorizeRequest(req, res)) {
+        return;
+    }
+
+    const body = req.body as RuntimeStateUpsertBody;
+    const databaseUrl = asNonEmptyString(body.databaseUrl);
+    if (!databaseUrl) {
+        return res.status(400).json({ error: "databaseUrl is required." });
+    }
+
+    const parsedVersion = Number(body.version);
+    const version = Number.isFinite(parsedVersion) && parsedVersion >= 0 ? Math.floor(parsedVersion) : 0;
+    const config = body.config && typeof body.config === "object" && !Array.isArray(body.config)
+        ? (body.config as Record<string, unknown>)
+        : {};
+    const secrets = body.secrets && typeof body.secrets === "object" && !Array.isArray(body.secrets)
+        ? (body.secrets as Record<string, unknown>)
+        : {};
+
+    try {
+        const result = await upsertRuntimeStateInProjectDatabase({
+            databaseUrl,
+            version,
+            config,
+            secrets,
+        });
+
+        return res.json({ ok: true, appliedVersion: result.appliedVersion });
+    } catch (error) {
+        const message =
+            error instanceof Error && error.message.trim().length > 0
+                ? error.message.trim()
+                : "Failed to upsert runtime state in project database.";
 
         return res.status(500).json({ error: message });
     }

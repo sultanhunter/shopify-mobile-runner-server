@@ -48,6 +48,13 @@ export interface RuntimeDatabaseExplorerResult {
     rowCount: number;
 }
 
+export interface RuntimeStateUpsertInput {
+    databaseUrl: string;
+    version: number;
+    config: Record<string, unknown>;
+    secrets: Record<string, unknown>;
+}
+
 interface PgLikeError {
     code?: string;
     detail?: string;
@@ -235,6 +242,14 @@ function parseExplorerLimit(input: number | undefined): number {
     }
 
     return Math.min(Math.floor(input), 200);
+}
+
+function parseRuntimeVersion(input: number | undefined): number {
+    if (!Number.isFinite(input) || input === undefined || input < 0) {
+        return 0;
+    }
+
+    return Math.floor(input);
 }
 
 function escapeIdentifier(value: string): string {
@@ -513,6 +528,36 @@ export async function exploreRuntimeDatabase(input: {
                 rows: rowsResult.rows,
                 rowCount: rowsResult.rowCount ?? rowsResult.rows.length,
             };
+        } finally {
+            await pool.end();
+        }
+    });
+}
+
+export async function upsertRuntimeStateInProjectDatabase(input: RuntimeStateUpsertInput): Promise<{ appliedVersion: number }> {
+    const databaseUrl = input.databaseUrl.trim();
+    if (!databaseUrl) {
+        throw new Error("databaseUrl is required.");
+    }
+
+    const version = parseRuntimeVersion(input.version);
+    const config = input.config && typeof input.config === "object" ? input.config : {};
+    const secrets = input.secrets && typeof input.secrets === "object" ? input.secrets : {};
+
+    return withTransientRetry(async () => {
+        const pool = createAdminPool(databaseUrl);
+
+        try {
+            await pool.query(
+                "create table if not exists runtime_sync_state (id text primary key, version bigint not null default 0, config_json jsonb not null default '{}'::jsonb, secrets_json jsonb not null default '{}'::jsonb, updated_at timestamptz not null default now())",
+            );
+
+            await pool.query(
+                "insert into runtime_sync_state (id, version, config_json, secrets_json) values ($1, $2, $3::jsonb, $4::jsonb) on conflict (id) do update set version = excluded.version, config_json = excluded.config_json, secrets_json = excluded.secrets_json, updated_at = now()",
+                ["runtime", version, JSON.stringify(config), JSON.stringify(secrets)],
+            );
+
+            return { appliedVersion: version };
         } finally {
             await pool.end();
         }
