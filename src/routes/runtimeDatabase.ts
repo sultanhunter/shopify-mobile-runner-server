@@ -1,12 +1,19 @@
 import { Request, Response, Router } from "express";
 import {
     checkRuntimeAdminDatabaseHealth,
+    exploreRuntimeDatabase,
     getRuntimeAdminDatabaseTarget,
     provisionRuntimeDatabase,
 } from "../services/runtimeDatabase.js";
 
 interface ProvisionRuntimeDatabaseBody {
     projectId?: unknown;
+}
+
+interface ExploreRuntimeDatabaseBody {
+    databaseUrl?: unknown;
+    table?: unknown;
+    limit?: unknown;
 }
 
 function asNonEmptyString(value: unknown): string | null {
@@ -83,6 +90,39 @@ router.post("/shopify-mobile/runtime-db/provision", async (req: Request, res: Re
         return res.status(500).json({
             error: message,
         });
+    }
+});
+
+router.post("/shopify-mobile/runtime-db/explore", async (req: Request, res: Response) => {
+    if (!authorizeRequest(req, res)) {
+        return;
+    }
+
+    const body = req.body as ExploreRuntimeDatabaseBody;
+    const databaseUrl = asNonEmptyString(body.databaseUrl);
+    if (!databaseUrl) {
+        return res.status(400).json({ error: "databaseUrl is required." });
+    }
+
+    const table = asNonEmptyString(body.table);
+    const parsedLimit = Number(body.limit);
+    const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.floor(parsedLimit) : undefined;
+
+    try {
+        const result = await exploreRuntimeDatabase({
+            databaseUrl,
+            table: table ?? undefined,
+            limit,
+        });
+
+        return res.json(result);
+    } catch (error) {
+        const message =
+            error instanceof Error && error.message.trim().length > 0
+                ? error.message.trim()
+                : "Failed to explore runtime database.";
+
+        return res.status(500).json({ error: message });
     }
 });
 

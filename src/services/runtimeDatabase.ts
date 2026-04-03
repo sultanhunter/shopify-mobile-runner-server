@@ -35,6 +35,19 @@ export interface RuntimeDatabaseAdminTarget {
     error?: string;
 }
 
+export interface RuntimeDatabaseExplorerColumn {
+    name: string;
+    type: string;
+}
+
+export interface RuntimeDatabaseExplorerResult {
+    tables: string[];
+    selectedTable: string | null;
+    columns: RuntimeDatabaseExplorerColumn[];
+    rows: Array<Record<string, unknown>>;
+    rowCount: number;
+}
+
 interface PgLikeError {
     code?: string;
     detail?: string;
@@ -214,6 +227,18 @@ function buildProjectName(prefix: string, projectId: string, fallbackPrefix: str
         .slice(0, 28);
     const raw = `${prefix}${compactProjectId}`;
     return sanitizeIdentifier(raw, fallbackPrefix);
+}
+
+function parseExplorerLimit(input: number | undefined): number {
+    if (!Number.isFinite(input) || !input || input <= 0) {
+        return 40;
+    }
+
+    return Math.min(Math.floor(input), 200);
+}
+
+function escapeIdentifier(value: string): string {
+    return `"${value.replace(/"/g, '""')}"`;
 }
 
 function makeRuntimeDatabaseUrl(
@@ -423,4 +448,73 @@ export async function provisionRuntimeDatabase(projectId: string): Promise<Runti
             databaseName,
         }),
     };
+}
+
+export async function exploreRuntimeDatabase(input: {
+    databaseUrl: string;
+    table?: string;
+    limit?: number;
+}): Promise<RuntimeDatabaseExplorerResult> {
+    const databaseUrl = input.databaseUrl.trim();
+    if (!databaseUrl) {
+        throw new Error("databaseUrl is required.");
+    }
+
+    const requestedTable = input.table?.trim();
+    const rowLimit = parseExplorerLimit(input.limit);
+
+    return withTransientRetry(async () => {
+        const pool = createAdminPool(databaseUrl);
+
+        try {
+            const tablesResult = await pool.query<{ table_name: string }>(
+                `
+                select table_name
+                from information_schema.tables
+                where table_schema = 'public'
+                  and table_type = 'BASE TABLE'
+                order by table_name asc
+                `,
+            );
+
+            const tables = tablesResult.rows.map((row) => row.table_name);
+            const selectedTable = requestedTable && tables.includes(requestedTable) ? requestedTable : tables[0] ?? null;
+            if (!selectedTable) {
+                return {
+                    tables,
+                    selectedTable: null,
+                    columns: [],
+                    rows: [],
+                    rowCount: 0,
+                };
+            }
+
+            const columnsResult = await pool.query<{ column_name: string; data_type: string }>(
+                `
+                select column_name, data_type
+                from information_schema.columns
+                where table_schema = 'public'
+                  and table_name = $1
+                order by ordinal_position asc
+                `,
+                [selectedTable],
+            );
+
+            const safeTable = escapeIdentifier(selectedTable);
+            const rowsResult = await pool.query<Record<string, unknown>>(`select * from ${safeTable} limit $1`, [rowLimit]);
+
+            return {
+                tables,
+                selectedTable,
+                columns: columnsResult.rows.map((row) => ({
+                    name: row.column_name,
+                    type: row.data_type,
+                })),
+                rows: rowsResult.rows,
+                rowCount: rowsResult.rowCount ?? rowsResult.rows.length,
+            };
+        } finally {
+            await pool.end();
+        }
+    });
 }
