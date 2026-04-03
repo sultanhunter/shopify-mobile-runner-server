@@ -46,8 +46,13 @@ router.post("/shopify-mobile/runtime-db/provision", async (req: Request, res: Re
         const runtimeDatabase = await provisionRuntimeDatabase(projectId);
         return res.json({ runtimeDatabase });
     } catch (error) {
+        const message =
+            error instanceof Error && error.message.trim().length > 0
+                ? error.message.trim()
+                : "Failed to provision runtime database.";
+
         return res.status(500).json({
-            error: error instanceof Error ? error.message : "Failed to provision runtime database.",
+            error: message,
         });
     }
 });

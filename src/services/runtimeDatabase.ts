@@ -10,6 +10,13 @@ export interface RuntimeDatabaseProvisionResult {
     databaseUrl: string;
 }
 
+interface PgLikeError {
+    code?: string;
+    detail?: string;
+    hint?: string;
+    message?: string;
+}
+
 function getRuntimeAdminDatabaseUrl(): string {
     const value =
         process.env.RUNNER_RUNTIME_ADMIN_DATABASE_URL?.trim() ||
@@ -23,6 +30,15 @@ function getRuntimeAdminDatabaseUrl(): string {
     }
 
     return value;
+}
+
+function isLikelyPooledConnection(connectionString: string): boolean {
+    try {
+        const url = new URL(connectionString);
+        return url.hostname.includes("-pooler.");
+    } catch {
+        return false;
+    }
 }
 
 function getRuntimeDatabasePrefix(): string {
@@ -94,6 +110,58 @@ function isSetRoleRequiredError(error: unknown): boolean {
     return message.toLowerCase().includes("must be able to set role");
 }
 
+function formatProvisionError(error: unknown): string {
+    const pgError = error as PgLikeError;
+    const message =
+        error instanceof Error
+            ? error.message.trim()
+            : typeof pgError?.message === "string"
+              ? pgError.message.trim()
+              : String(error).trim();
+
+    const details: string[] = [];
+    if (typeof pgError?.code === "string" && pgError.code.trim()) {
+        details.push(`code=${pgError.code.trim()}`);
+    }
+    if (typeof pgError?.detail === "string" && pgError.detail.trim()) {
+        details.push(`detail=${pgError.detail.trim()}`);
+    }
+    if (typeof pgError?.hint === "string" && pgError.hint.trim()) {
+        details.push(`hint=${pgError.hint.trim()}`);
+    }
+
+    return details.length > 0 ? `${message || "unknown error"} (${details.join("; ")})` : message || "unknown error";
+}
+
+async function assertAdminCapabilities(pool: Pool): Promise<void> {
+    const capabilities = await pool.query(
+        "select current_user as current_user, rolcreatedb, rolcreaterole from pg_roles where rolname = current_user",
+    );
+    const row = capabilities.rows[0] as
+        | {
+              current_user?: string;
+              rolcreatedb?: boolean;
+              rolcreaterole?: boolean;
+          }
+        | undefined;
+
+    if (!row) {
+        throw new Error("Unable to verify runtime DB admin capabilities.");
+    }
+
+    if (!row.rolcreatedb) {
+        throw new Error(
+            `Runtime DB admin user ${row.current_user ?? "(unknown)"} is missing CREATEDB. Use an owner/admin connection URL.`,
+        );
+    }
+
+    if (!row.rolcreaterole) {
+        throw new Error(
+            `Runtime DB admin user ${row.current_user ?? "(unknown)"} is missing CREATEROLE. Use an owner/admin connection URL.`,
+        );
+    }
+}
+
 async function grantRuntimeSchemaPrivileges(adminDatabaseUrl: string, databaseName: string, roleName: string): Promise<void> {
     const databaseUrl = new URL(adminDatabaseUrl);
     databaseUrl.pathname = `/${databaseName}`;
@@ -108,13 +176,22 @@ async function grantRuntimeSchemaPrivileges(adminDatabaseUrl: string, databaseNa
 
 export async function provisionRuntimeDatabase(projectId: string): Promise<RuntimeDatabaseProvisionResult> {
     const adminDatabaseUrl = getRuntimeAdminDatabaseUrl();
+    if (isLikelyPooledConnection(adminDatabaseUrl)) {
+        throw new Error("RUNNER_RUNTIME_ADMIN_DATABASE_URL must use a direct Postgres host (not Neon pooler).",);
+    }
+
     const databaseName = buildProjectName(getRuntimeDatabasePrefix(), projectId, "runtime_db");
     const roleName = buildProjectName(getRuntimeRolePrefix(), projectId, "runtime_role");
     const rolePassword = randomBytes(24).toString("hex");
+    let stage = "connect_admin";
 
     const pool = createAdminPool(adminDatabaseUrl);
 
     try {
+        stage = "check_admin_capabilities";
+        await assertAdminCapabilities(pool);
+
+        stage = "create_or_update_role";
         const roleExists = await pool.query("select 1 from pg_roles where rolname = $1 limit 1", [roleName]);
         if (roleExists.rowCount && roleExists.rowCount > 0) {
             await pool.query(`alter role ${roleName} with login password '${rolePassword}'`);
@@ -122,6 +199,7 @@ export async function provisionRuntimeDatabase(projectId: string): Promise<Runti
             await pool.query(`create role ${roleName} with login password '${rolePassword}'`);
         }
 
+        stage = "ensure_database";
         const databaseExists = await pool.query("select 1 from pg_database where datname = $1 limit 1", [databaseName]);
         if (!databaseExists.rowCount || databaseExists.rowCount === 0) {
             try {
@@ -131,16 +209,25 @@ export async function provisionRuntimeDatabase(projectId: string): Promise<Runti
                     throw error;
                 }
 
+                stage = "create_database_without_owner";
                 await pool.query(`create database ${databaseName}`);
             }
         }
 
+        stage = "grant_database_privileges";
         await pool.query(`grant all privileges on database ${databaseName} to ${roleName}`);
+    } catch (error) {
+        throw new Error(`Runtime DB provisioning failed at ${stage}: ${formatProvisionError(error)}`);
     } finally {
         await pool.end();
     }
 
-    await grantRuntimeSchemaPrivileges(adminDatabaseUrl, databaseName, roleName);
+    stage = "grant_schema_privileges";
+    try {
+        await grantRuntimeSchemaPrivileges(adminDatabaseUrl, databaseName, roleName);
+    } catch (error) {
+        throw new Error(`Runtime DB provisioning failed at ${stage}: ${formatProvisionError(error)}`);
+    }
 
     return {
         provider: "postgres",
