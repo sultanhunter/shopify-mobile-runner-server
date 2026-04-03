@@ -89,6 +89,23 @@ function createAdminPool(connectionString: string): Pool {
     });
 }
 
+function isSetRoleRequiredError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.toLowerCase().includes("must be able to set role");
+}
+
+async function grantRuntimeSchemaPrivileges(adminDatabaseUrl: string, databaseName: string, roleName: string): Promise<void> {
+    const databaseUrl = new URL(adminDatabaseUrl);
+    databaseUrl.pathname = `/${databaseName}`;
+
+    const databasePool = createAdminPool(databaseUrl.toString());
+    try {
+        await databasePool.query(`grant usage, create on schema public to ${roleName}`);
+    } finally {
+        await databasePool.end();
+    }
+}
+
 export async function provisionRuntimeDatabase(projectId: string): Promise<RuntimeDatabaseProvisionResult> {
     const adminDatabaseUrl = getRuntimeAdminDatabaseUrl();
     const databaseName = buildProjectName(getRuntimeDatabasePrefix(), projectId, "runtime_db");
@@ -107,13 +124,23 @@ export async function provisionRuntimeDatabase(projectId: string): Promise<Runti
 
         const databaseExists = await pool.query("select 1 from pg_database where datname = $1 limit 1", [databaseName]);
         if (!databaseExists.rowCount || databaseExists.rowCount === 0) {
-            await pool.query(`create database ${databaseName} owner ${roleName}`);
+            try {
+                await pool.query(`create database ${databaseName} owner ${roleName}`);
+            } catch (error) {
+                if (!isSetRoleRequiredError(error)) {
+                    throw error;
+                }
+
+                await pool.query(`create database ${databaseName}`);
+            }
         }
 
         await pool.query(`grant all privileges on database ${databaseName} to ${roleName}`);
     } finally {
         await pool.end();
     }
+
+    await grantRuntimeSchemaPrivileges(adminDatabaseUrl, databaseName, roleName);
 
     return {
         provider: "postgres",
