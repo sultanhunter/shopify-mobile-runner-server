@@ -75,6 +75,11 @@ async function handleBackendProxy(req: Request, res: Response) {
         Accept: req.headers.accept || "*/*",
     };
 
+    const authorization = req.headers.authorization;
+    if (typeof authorization === "string" && authorization.trim().length > 0) {
+        headers.Authorization = authorization;
+    }
+
     const contentType = req.headers["content-type"];
     if (typeof contentType === "string") {
         headers["Content-Type"] = contentType;
