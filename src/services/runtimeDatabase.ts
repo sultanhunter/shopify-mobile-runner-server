@@ -22,6 +22,15 @@ export interface RuntimeDatabaseAdminHealth {
     rolcreaterole: boolean;
 }
 
+export interface RuntimeDatabaseAdminTarget {
+    source?: RuntimeDatabaseAdminHealth["source"];
+    host?: string;
+    configuredDatabase?: string;
+    configuredUser?: string;
+    isPoolerHost?: boolean;
+    error?: string;
+}
+
 interface PgLikeError {
     code?: string;
     detail?: string;
@@ -64,6 +73,25 @@ function getRuntimeAdminDatabaseConfig(): {
     }
 
     throw new Error("RUNNER_RUNTIME_ADMIN_DATABASE_URL is required for runtime DB provisioning on runner.");
+}
+
+export function getRuntimeAdminDatabaseTarget(): RuntimeDatabaseAdminTarget {
+    try {
+        const adminConfig = getRuntimeAdminDatabaseConfig();
+        const parsed = new URL(adminConfig.connectionString);
+
+        return {
+            source: adminConfig.source,
+            host: parsed.hostname,
+            configuredDatabase: parsed.pathname.replace(/^\//, "") || "(default)",
+            configuredUser: parsed.username ? decodeURIComponent(parsed.username) : "(unset)",
+            isPoolerHost: isLikelyPooledConnection(adminConfig.connectionString),
+        };
+    } catch (error) {
+        return {
+            error: error instanceof Error ? error.message : String(error),
+        };
+    }
 }
 
 function isLikelyPooledConnection(connectionString: string): boolean {

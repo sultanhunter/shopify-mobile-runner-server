@@ -1,5 +1,9 @@
 import { Request, Response, Router } from "express";
-import { checkRuntimeAdminDatabaseHealth, provisionRuntimeDatabase } from "../services/runtimeDatabase.js";
+import {
+    checkRuntimeAdminDatabaseHealth,
+    getRuntimeAdminDatabaseTarget,
+    provisionRuntimeDatabase,
+} from "../services/runtimeDatabase.js";
 
 interface ProvisionRuntimeDatabaseBody {
     projectId?: unknown;
@@ -51,6 +55,7 @@ router.get("/shopify-mobile/runtime-db/health", async (req: Request, res: Respon
         return res.status(500).json({
             ok: false,
             error: message,
+            target: getRuntimeAdminDatabaseTarget(),
         });
     }
 });
