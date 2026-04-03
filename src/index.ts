@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import { randomUUID } from "node:crypto";
+import { setDefaultResultOrder } from "node:dns";
 
 import cors from "cors";
 import express from "express";
@@ -15,6 +16,14 @@ import { getDevSessionStats, listActiveDevSessionProjectIds, stopDevSessionsForP
 import { listActiveOpenCodeRunProjectIds, stopOpenCodeRunsForProjects } from "./services/opencodeSession.js";
 
 dotenv.config();
+
+if ((process.env.RUNNER_RUNTIME_DB_FORCE_IPV4 ?? "true").toLowerCase() !== "false") {
+    try {
+        setDefaultResultOrder("ipv4first");
+    } catch (error) {
+        console.warn("[DNS] Failed to set default result order", error);
+    }
+}
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;

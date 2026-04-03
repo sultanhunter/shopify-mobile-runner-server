@@ -28,6 +28,8 @@ export interface RuntimeDatabaseAdminTarget {
     configuredDatabase?: string;
     configuredUser?: string;
     isPoolerHost?: boolean;
+    forceIpv4?: boolean;
+    connectionTimeoutMs?: number;
     error?: string;
 }
 
@@ -42,6 +44,19 @@ interface AdminCapabilityRow {
     current_user?: string;
     rolcreatedb?: boolean;
     rolcreaterole?: boolean;
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function shouldForceIpv4(): boolean {
+    return (process.env.RUNNER_RUNTIME_DB_FORCE_IPV4 ?? "true").toLowerCase() !== "false";
+}
+
+function getRuntimeDbConnectionTimeoutMs(): number {
+    return parsePositiveInteger(process.env.RUNNER_RUNTIME_DB_CONNECT_TIMEOUT_MS, 12000);
 }
 
 function getRuntimeAdminDatabaseConfig(): {
@@ -86,6 +101,8 @@ export function getRuntimeAdminDatabaseTarget(): RuntimeDatabaseAdminTarget {
             configuredDatabase: parsed.pathname.replace(/^\//, "") || "(default)",
             configuredUser: parsed.username ? decodeURIComponent(parsed.username) : "(unset)",
             isPoolerHost: isLikelyPooledConnection(adminConfig.connectionString),
+            forceIpv4: shouldForceIpv4(),
+            connectionTimeoutMs: getRuntimeDbConnectionTimeoutMs(),
         };
     } catch (error) {
         return {
@@ -163,6 +180,9 @@ function createAdminPool(connectionString: string): Pool {
     return new Pool({
         connectionString,
         max: 1,
+        keepAlive: true,
+        connectionTimeoutMillis: getRuntimeDbConnectionTimeoutMs(),
+        ...(shouldForceIpv4() ? { family: 4 as const } : {}),
         ssl: connectionString.includes("localhost") ? undefined : { rejectUnauthorized: false },
     });
 }
