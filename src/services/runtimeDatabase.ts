@@ -10,6 +10,18 @@ export interface RuntimeDatabaseProvisionResult {
     databaseUrl: string;
 }
 
+export interface RuntimeDatabaseAdminHealth {
+    source: "RUNNER_RUNTIME_ADMIN_DATABASE_URL" | "RUNTIME_ADMIN_DATABASE_URL" | "NEON_ADMIN_DATABASE_URL";
+    host: string;
+    configuredDatabase: string;
+    configuredUser: string;
+    currentUser: string;
+    currentDatabase: string;
+    isPoolerHost: boolean;
+    rolcreatedb: boolean;
+    rolcreaterole: boolean;
+}
+
 interface PgLikeError {
     code?: string;
     detail?: string;
@@ -17,19 +29,41 @@ interface PgLikeError {
     message?: string;
 }
 
-function getRuntimeAdminDatabaseUrl(): string {
-    const value =
-        process.env.RUNNER_RUNTIME_ADMIN_DATABASE_URL?.trim() ||
-        process.env.RUNTIME_ADMIN_DATABASE_URL?.trim() ||
-        process.env.NEON_ADMIN_DATABASE_URL?.trim();
+interface AdminCapabilityRow {
+    current_user?: string;
+    rolcreatedb?: boolean;
+    rolcreaterole?: boolean;
+}
 
-    if (!value) {
-        throw new Error(
-            "RUNNER_RUNTIME_ADMIN_DATABASE_URL is required for runtime DB provisioning on runner.",
-        );
+function getRuntimeAdminDatabaseConfig(): {
+    source: RuntimeDatabaseAdminHealth["source"];
+    connectionString: string;
+} {
+    const runnerValue = process.env.RUNNER_RUNTIME_ADMIN_DATABASE_URL?.trim();
+    if (runnerValue) {
+        return {
+            source: "RUNNER_RUNTIME_ADMIN_DATABASE_URL",
+            connectionString: runnerValue,
+        };
     }
 
-    return value;
+    const runtimeValue = process.env.RUNTIME_ADMIN_DATABASE_URL?.trim();
+    if (runtimeValue) {
+        return {
+            source: "RUNTIME_ADMIN_DATABASE_URL",
+            connectionString: runtimeValue,
+        };
+    }
+
+    const neonValue = process.env.NEON_ADMIN_DATABASE_URL?.trim();
+    if (neonValue) {
+        return {
+            source: "NEON_ADMIN_DATABASE_URL",
+            connectionString: neonValue,
+        };
+    }
+
+    throw new Error("RUNNER_RUNTIME_ADMIN_DATABASE_URL is required for runtime DB provisioning on runner.");
 }
 
 function isLikelyPooledConnection(connectionString: string): boolean {
@@ -134,16 +168,7 @@ function formatProvisionError(error: unknown): string {
 }
 
 async function assertAdminCapabilities(pool: Pool): Promise<void> {
-    const capabilities = await pool.query(
-        "select current_user as current_user, rolcreatedb, rolcreaterole from pg_roles where rolname = current_user",
-    );
-    const row = capabilities.rows[0] as
-        | {
-              current_user?: string;
-              rolcreatedb?: boolean;
-              rolcreaterole?: boolean;
-          }
-        | undefined;
+    const row = await readAdminCapabilityRow(pool);
 
     if (!row) {
         throw new Error("Unable to verify runtime DB admin capabilities.");
@@ -162,6 +187,54 @@ async function assertAdminCapabilities(pool: Pool): Promise<void> {
     }
 }
 
+async function readAdminCapabilityRow(pool: Pool): Promise<AdminCapabilityRow | undefined> {
+    const capabilities = await pool.query(
+        "select current_user as current_user, rolcreatedb, rolcreaterole from pg_roles where rolname = current_user",
+    );
+    return capabilities.rows[0] as AdminCapabilityRow | undefined;
+}
+
+export async function checkRuntimeAdminDatabaseHealth(): Promise<RuntimeDatabaseAdminHealth> {
+    const adminConfig = getRuntimeAdminDatabaseConfig();
+    const adminDatabaseUrl = adminConfig.connectionString;
+    const parsed = new URL(adminDatabaseUrl);
+    const configuredDatabase = parsed.pathname.replace(/^\//, "") || "(default)";
+    const configuredUser = parsed.username ? decodeURIComponent(parsed.username) : "(unset)";
+
+    const pool = createAdminPool(adminDatabaseUrl);
+    let stage = "connect_admin";
+    try {
+        stage = "resolve_identity";
+        const identityResult = await pool.query("select current_user as current_user, current_database() as current_database");
+        const identity = identityResult.rows[0] as { current_user?: string; current_database?: string } | undefined;
+        if (!identity?.current_user || !identity?.current_database) {
+            throw new Error("Unable to resolve current_user/current_database from admin connection.");
+        }
+
+        stage = "check_admin_capabilities";
+        const capabilities = await readAdminCapabilityRow(pool);
+        if (!capabilities) {
+            throw new Error("Unable to read admin role capabilities.");
+        }
+
+        return {
+            source: adminConfig.source,
+            host: parsed.hostname,
+            configuredDatabase,
+            configuredUser,
+            currentUser: identity.current_user,
+            currentDatabase: identity.current_database,
+            isPoolerHost: isLikelyPooledConnection(adminDatabaseUrl),
+            rolcreatedb: Boolean(capabilities.rolcreatedb),
+            rolcreaterole: Boolean(capabilities.rolcreaterole),
+        };
+    } catch (error) {
+        throw new Error(`Runtime DB admin health check failed at ${stage}: ${formatProvisionError(error)}`);
+    } finally {
+        await pool.end();
+    }
+}
+
 async function grantRuntimeSchemaPrivileges(adminDatabaseUrl: string, databaseName: string, roleName: string): Promise<void> {
     const databaseUrl = new URL(adminDatabaseUrl);
     databaseUrl.pathname = `/${databaseName}`;
@@ -175,7 +248,8 @@ async function grantRuntimeSchemaPrivileges(adminDatabaseUrl: string, databaseNa
 }
 
 export async function provisionRuntimeDatabase(projectId: string): Promise<RuntimeDatabaseProvisionResult> {
-    const adminDatabaseUrl = getRuntimeAdminDatabaseUrl();
+    const adminConfig = getRuntimeAdminDatabaseConfig();
+    const adminDatabaseUrl = adminConfig.connectionString;
     if (isLikelyPooledConnection(adminDatabaseUrl)) {
         throw new Error("RUNNER_RUNTIME_ADMIN_DATABASE_URL must use a direct Postgres host (not Neon pooler).",);
     }

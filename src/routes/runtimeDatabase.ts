@@ -1,5 +1,5 @@
 import { Request, Response, Router } from "express";
-import { provisionRuntimeDatabase } from "../services/runtimeDatabase.js";
+import { checkRuntimeAdminDatabaseHealth, provisionRuntimeDatabase } from "../services/runtimeDatabase.js";
 
 interface ProvisionRuntimeDatabaseBody {
     projectId?: unknown;
@@ -30,6 +30,30 @@ function authorizeRequest(req: Request, res: Response): boolean {
 }
 
 const router = Router();
+
+router.get("/shopify-mobile/runtime-db/health", async (req: Request, res: Response) => {
+    if (!authorizeRequest(req, res)) {
+        return;
+    }
+
+    try {
+        const health = await checkRuntimeAdminDatabaseHealth();
+        return res.json({
+            ok: true,
+            health,
+        });
+    } catch (error) {
+        const message =
+            error instanceof Error && error.message.trim().length > 0
+                ? error.message.trim()
+                : "Failed to check runtime DB admin connectivity.";
+
+        return res.status(500).json({
+            ok: false,
+            error: message,
+        });
+    }
+});
 
 router.post("/shopify-mobile/runtime-db/provision", async (req: Request, res: Response) => {
     if (!authorizeRequest(req, res)) {

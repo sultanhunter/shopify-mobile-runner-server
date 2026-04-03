@@ -15,6 +15,7 @@ Standalone runner backend for the Shopify Mobile AI MVP.
 - `POST /api/shopify-mobile/dev-session/:sessionId/stop` - Stop session
 - `POST /api/shopify-mobile/dev-session/:sessionId/apply-and-push` - Apply files and push commit
 - `ANY /api/shopify-mobile/dev-session/:sessionId/expo-backend/*` - Proxy to workspace expo backend process
+- `GET /api/shopify-mobile/runtime-db/health` - Verify runtime DB admin connectivity and capabilities
 - `POST /api/shopify-mobile/runtime-db/provision` - Provision per-project Postgres DB + role
 
 ## Quick Start
