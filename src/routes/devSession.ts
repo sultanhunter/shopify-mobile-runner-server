@@ -27,6 +27,7 @@ interface StartDevSessionBody {
     backendHealthPath?: unknown;
     startBackend?: unknown;
     injectExpoPublicRuntimeBackendUrl?: unknown;
+    runtimeDatabaseUrl?: unknown;
     publicBaseUrl?: unknown;
 }
 
@@ -131,6 +132,7 @@ router.post("/shopify-mobile/dev-session/start", async (req: Request, res: Respo
             backendHealthPath: asNonEmptyString(body.backendHealthPath) ?? undefined,
             startBackend: asBoolean(body.startBackend, true),
             injectExpoPublicRuntimeBackendUrl: asBoolean(body.injectExpoPublicRuntimeBackendUrl, false),
+            runtimeDatabaseUrl: asNonEmptyString(body.runtimeDatabaseUrl) ?? undefined,
             publicBaseUrl,
         });
 

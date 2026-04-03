@@ -48,6 +48,7 @@ export interface StartDevSessionInput {
     backendHealthPath?: string;
     startBackend?: boolean;
     injectExpoPublicRuntimeBackendUrl?: boolean;
+    runtimeDatabaseUrl?: string;
     publicBaseUrl?: string;
 }
 
@@ -108,6 +109,7 @@ interface DevSessionInternal {
     backendHealthPath: string;
     startBackend: boolean;
     injectExpoPublicRuntimeBackendUrl: boolean;
+    runtimeDatabaseUrl?: string;
     publicBaseUrl?: string;
     controlPlaneBaseUrl?: string;
     expoUrl?: string;
@@ -961,6 +963,9 @@ async function startBackendProcess(session: DevSessionInternal, backendPath: str
         session,
         `Boot config PROJECT_ID=${session.projectId} CONTROL_PLANE_BASE_URL=${session.controlPlaneBaseUrl ?? "<from backend defaults>"}`,
     );
+    if (session.runtimeDatabaseUrl) {
+        appendBackendLog(session, "Boot config DATABASE_URL=provided");
+    }
 
     const child = spawn(parsed.command, parsed.args, {
         cwd: backendPath,
@@ -969,6 +974,7 @@ async function startBackendProcess(session: DevSessionInternal, backendPath: str
             NODE_ENV: "development",
             PORT: String(session.backendPort),
             PROJECT_ID: session.projectId,
+            ...(session.runtimeDatabaseUrl ? { DATABASE_URL: session.runtimeDatabaseUrl } : {}),
             RUNTIME_SYNC_TOKEN:
                 process.env.RUNTIME_SYNC_TOKEN?.trim() ||
                 process.env.RUNNER_SERVER_TOKEN?.trim() ||
@@ -1518,6 +1524,7 @@ export async function startDevSession(input: StartDevSessionInput): Promise<DevS
         backendHealthPath: expoBackendHealthPath,
         startBackend: startExpoBackend,
         injectExpoPublicRuntimeBackendUrl: input.injectExpoPublicRuntimeBackendUrl === true,
+        runtimeDatabaseUrl: input.runtimeDatabaseUrl?.trim() || undefined,
         publicBaseUrl: input.publicBaseUrl?.trim() || undefined,
         controlPlaneBaseUrl: input.controlPlaneBaseUrl?.trim() || undefined,
         backendStatus: startExpoBackend ? "starting" : "stopped",
