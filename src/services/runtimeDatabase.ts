@@ -30,6 +30,8 @@ export interface RuntimeDatabaseAdminTarget {
     isPoolerHost?: boolean;
     forceIpv4?: boolean;
     connectionTimeoutMs?: number;
+    retryAttempts?: number;
+    retryBaseDelayMs?: number;
     error?: string;
 }
 
@@ -57,6 +59,58 @@ function shouldForceIpv4(): boolean {
 
 function getRuntimeDbConnectionTimeoutMs(): number {
     return parsePositiveInteger(process.env.RUNNER_RUNTIME_DB_CONNECT_TIMEOUT_MS, 12000);
+}
+
+function getRuntimeDbRetryAttempts(): number {
+    return parsePositiveInteger(process.env.RUNNER_RUNTIME_DB_RETRY_ATTEMPTS, 3);
+}
+
+function getRuntimeDbRetryBaseDelayMs(): number {
+    return parsePositiveInteger(process.env.RUNNER_RUNTIME_DB_RETRY_BASE_DELAY_MS, 800);
+}
+
+function wait(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isTransientConnectionError(error: unknown): boolean {
+    const pgError = error as PgLikeError;
+    const code = typeof pgError?.code === "string" ? pgError.code.trim().toUpperCase() : "";
+    if (!code) {
+        return false;
+    }
+
+    return (
+        code === "ETIMEDOUT" ||
+        code === "ECONNRESET" ||
+        code === "ECONNREFUSED" ||
+        code === "EHOSTUNREACH" ||
+        code === "ENETUNREACH" ||
+        code === "EAI_AGAIN" ||
+        code === "ENOTFOUND"
+    );
+}
+
+async function withTransientRetry<T>(operation: () => Promise<T>): Promise<T> {
+    const attempts = getRuntimeDbRetryAttempts();
+    const baseDelayMs = getRuntimeDbRetryBaseDelayMs();
+
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+        try {
+            return await operation();
+        } catch (error) {
+            lastError = error;
+            const canRetry = attempt < attempts && isTransientConnectionError(error);
+            if (!canRetry) {
+                throw error;
+            }
+
+            await wait(baseDelayMs * attempt);
+        }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error("Runtime DB operation failed.");
 }
 
 function getRuntimeAdminDatabaseConfig(): {
@@ -103,6 +157,8 @@ export function getRuntimeAdminDatabaseTarget(): RuntimeDatabaseAdminTarget {
             isPoolerHost: isLikelyPooledConnection(adminConfig.connectionString),
             forceIpv4: shouldForceIpv4(),
             connectionTimeoutMs: getRuntimeDbConnectionTimeoutMs(),
+            retryAttempts: getRuntimeDbRetryAttempts(),
+            retryBaseDelayMs: getRuntimeDbRetryBaseDelayMs(),
         };
     } catch (error) {
         return {
@@ -249,38 +305,40 @@ export async function checkRuntimeAdminDatabaseHealth(): Promise<RuntimeDatabase
     const configuredDatabase = parsed.pathname.replace(/^\//, "") || "(default)";
     const configuredUser = parsed.username ? decodeURIComponent(parsed.username) : "(unset)";
 
-    const pool = createAdminPool(adminDatabaseUrl);
-    let stage = "connect_admin";
-    try {
-        stage = "resolve_identity";
-        const identityResult = await pool.query("select current_user as current_user, current_database() as current_database");
-        const identity = identityResult.rows[0] as { current_user?: string; current_database?: string } | undefined;
-        if (!identity?.current_user || !identity?.current_database) {
-            throw new Error("Unable to resolve current_user/current_database from admin connection.");
-        }
+    return withTransientRetry(async () => {
+        const pool = createAdminPool(adminDatabaseUrl);
+        let stage = "connect_admin";
+        try {
+            stage = "resolve_identity";
+            const identityResult = await pool.query("select current_user as current_user, current_database() as current_database");
+            const identity = identityResult.rows[0] as { current_user?: string; current_database?: string } | undefined;
+            if (!identity?.current_user || !identity?.current_database) {
+                throw new Error("Unable to resolve current_user/current_database from admin connection.");
+            }
 
-        stage = "check_admin_capabilities";
-        const capabilities = await readAdminCapabilityRow(pool);
-        if (!capabilities) {
-            throw new Error("Unable to read admin role capabilities.");
-        }
+            stage = "check_admin_capabilities";
+            const capabilities = await readAdminCapabilityRow(pool);
+            if (!capabilities) {
+                throw new Error("Unable to read admin role capabilities.");
+            }
 
-        return {
-            source: adminConfig.source,
-            host: parsed.hostname,
-            configuredDatabase,
-            configuredUser,
-            currentUser: identity.current_user,
-            currentDatabase: identity.current_database,
-            isPoolerHost: isLikelyPooledConnection(adminDatabaseUrl),
-            rolcreatedb: Boolean(capabilities.rolcreatedb),
-            rolcreaterole: Boolean(capabilities.rolcreaterole),
-        };
-    } catch (error) {
-        throw new Error(`Runtime DB admin health check failed at ${stage}: ${formatProvisionError(error)}`);
-    } finally {
-        await pool.end();
-    }
+            return {
+                source: adminConfig.source,
+                host: parsed.hostname,
+                configuredDatabase,
+                configuredUser,
+                currentUser: identity.current_user,
+                currentDatabase: identity.current_database,
+                isPoolerHost: isLikelyPooledConnection(adminDatabaseUrl),
+                rolcreatedb: Boolean(capabilities.rolcreatedb),
+                rolcreaterole: Boolean(capabilities.rolcreaterole),
+            };
+        } catch (error) {
+            throw new Error(`Runtime DB admin health check failed at ${stage}: ${formatProvisionError(error)}`);
+        } finally {
+            await pool.end();
+        }
+    });
 }
 
 async function grantRuntimeSchemaPrivileges(adminDatabaseUrl: string, databaseName: string, roleName: string): Promise<void> {
@@ -307,49 +365,53 @@ export async function provisionRuntimeDatabase(projectId: string): Promise<Runti
     const rolePassword = randomBytes(24).toString("hex");
     let stage = "connect_admin";
 
-    const pool = createAdminPool(adminDatabaseUrl);
+    await withTransientRetry(async () => {
+        const pool = createAdminPool(adminDatabaseUrl);
 
-    try {
-        stage = "check_admin_capabilities";
-        await assertAdminCapabilities(pool);
+        try {
+            stage = "check_admin_capabilities";
+            await assertAdminCapabilities(pool);
 
-        stage = "create_or_update_role";
-        const roleExists = await pool.query("select 1 from pg_roles where rolname = $1 limit 1", [roleName]);
-        if (roleExists.rowCount && roleExists.rowCount > 0) {
-            await pool.query(`alter role ${roleName} with login password '${rolePassword}'`);
-        } else {
-            await pool.query(`create role ${roleName} with login password '${rolePassword}'`);
-        }
-
-        stage = "ensure_database";
-        const databaseExists = await pool.query("select 1 from pg_database where datname = $1 limit 1", [databaseName]);
-        if (!databaseExists.rowCount || databaseExists.rowCount === 0) {
-            try {
-                await pool.query(`create database ${databaseName} owner ${roleName}`);
-            } catch (error) {
-                if (!isSetRoleRequiredError(error)) {
-                    throw error;
-                }
-
-                stage = "create_database_without_owner";
-                await pool.query(`create database ${databaseName}`);
+            stage = "create_or_update_role";
+            const roleExists = await pool.query("select 1 from pg_roles where rolname = $1 limit 1", [roleName]);
+            if (roleExists.rowCount && roleExists.rowCount > 0) {
+                await pool.query(`alter role ${roleName} with login password '${rolePassword}'`);
+            } else {
+                await pool.query(`create role ${roleName} with login password '${rolePassword}'`);
             }
-        }
 
-        stage = "grant_database_privileges";
-        await pool.query(`grant all privileges on database ${databaseName} to ${roleName}`);
-    } catch (error) {
-        throw new Error(`Runtime DB provisioning failed at ${stage}: ${formatProvisionError(error)}`);
-    } finally {
-        await pool.end();
-    }
+            stage = "ensure_database";
+            const databaseExists = await pool.query("select 1 from pg_database where datname = $1 limit 1", [databaseName]);
+            if (!databaseExists.rowCount || databaseExists.rowCount === 0) {
+                try {
+                    await pool.query(`create database ${databaseName} owner ${roleName}`);
+                } catch (error) {
+                    if (!isSetRoleRequiredError(error)) {
+                        throw error;
+                    }
+
+                    stage = "create_database_without_owner";
+                    await pool.query(`create database ${databaseName}`);
+                }
+            }
+
+            stage = "grant_database_privileges";
+            await pool.query(`grant all privileges on database ${databaseName} to ${roleName}`);
+        } catch (error) {
+            throw new Error(`Runtime DB provisioning failed at ${stage}: ${formatProvisionError(error)}`);
+        } finally {
+            await pool.end();
+        }
+    });
 
     stage = "grant_schema_privileges";
-    try {
-        await grantRuntimeSchemaPrivileges(adminDatabaseUrl, databaseName, roleName);
-    } catch (error) {
-        throw new Error(`Runtime DB provisioning failed at ${stage}: ${formatProvisionError(error)}`);
-    }
+    await withTransientRetry(async () => {
+        try {
+            await grantRuntimeSchemaPrivileges(adminDatabaseUrl, databaseName, roleName);
+        } catch (error) {
+            throw new Error(`Runtime DB provisioning failed at ${stage}: ${formatProvisionError(error)}`);
+        }
+    });
 
     return {
         provider: "postgres",

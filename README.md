@@ -30,7 +30,7 @@ GitHub repository creation is required by default for workspace creation (`RUNNE
 Set `GITHUB_TOKEN` (and optionally `GITHUB_OWNER`) on the runner before creating workspaces.
 
 For runtime DB provisioning via runner, set `RUNNER_RUNTIME_ADMIN_DATABASE_URL` (plus optional `RUNNER_RUNTIME_DATABASE_PREFIX` and `RUNNER_RUNTIME_ROLE_PREFIX`).
-If DNS/network behavior differs between shell and Node process, keep `RUNNER_RUNTIME_DB_FORCE_IPV4=true` and tune `RUNNER_RUNTIME_DB_CONNECT_TIMEOUT_MS`.
+If DNS/network behavior differs between shell and Node process, keep `RUNNER_RUNTIME_DB_FORCE_IPV4=true`, tune `RUNNER_RUNTIME_DB_CONNECT_TIMEOUT_MS`, and configure retries with `RUNNER_RUNTIME_DB_RETRY_ATTEMPTS`/`RUNNER_RUNTIME_DB_RETRY_BASE_DELAY_MS`.
 
 ## Deployment Script
 
