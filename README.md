@@ -15,6 +15,7 @@ Standalone runner backend for the Shopify Mobile AI MVP.
 - `POST /api/shopify-mobile/dev-session/:sessionId/stop` - Stop session
 - `POST /api/shopify-mobile/dev-session/:sessionId/apply-and-push` - Apply files and push commit
 - `ANY /api/shopify-mobile/dev-session/:sessionId/expo-backend/*` - Proxy to workspace expo backend process
+- `POST /api/shopify-mobile/runtime-db/provision` - Provision per-project Postgres DB + role
 
 ## Quick Start
 
@@ -26,6 +27,8 @@ Standalone runner backend for the Shopify Mobile AI MVP.
 
 GitHub repository creation is required by default for workspace creation (`RUNNER_REQUIRE_GITHUB_REPO=true`).
 Set `GITHUB_TOKEN` (and optionally `GITHUB_OWNER`) on the runner before creating workspaces.
+
+For runtime DB provisioning via runner, set `RUNNER_RUNTIME_ADMIN_DATABASE_URL` (plus optional `RUNNER_RUNTIME_DATABASE_PREFIX` and `RUNNER_RUNTIME_ROLE_PREFIX`).
 
 ## Deployment Script
 

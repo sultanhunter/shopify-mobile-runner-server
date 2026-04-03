@@ -969,6 +969,11 @@ async function startBackendProcess(session: DevSessionInternal, backendPath: str
             NODE_ENV: "development",
             PORT: String(session.backendPort),
             PROJECT_ID: session.projectId,
+            RUNTIME_SYNC_TOKEN:
+                process.env.RUNTIME_SYNC_TOKEN?.trim() ||
+                process.env.RUNNER_SERVER_TOKEN?.trim() ||
+                process.env.SHOPIFY_MOBILE_AI_SERVER_TOKEN?.trim() ||
+                "",
             ...(session.controlPlaneBaseUrl
                 ? { CONTROL_PLANE_BASE_URL: session.controlPlaneBaseUrl }
                 : {}),

@@ -7,6 +7,7 @@ import devSessionRoutes from "./routes/devSession.js";
 import devSessionProxyRoutes from "./routes/devSessionProxy.js";
 import expoScaffoldRoutes from "./routes/expoScaffold.js";
 import repoWorkspaceRoutes from "./routes/repoWorkspace.js";
+import runtimeDatabaseRoutes from "./routes/runtimeDatabase.js";
 import shopifyMobileAiRoutes from "./routes/shopifyMobileAi.js";
 import taskRoutes from "./routes/tasks.js";
 import { collectIdleProjectIds, getUserIdleTimeoutMs } from "./services/activityTracker.js";
@@ -87,6 +88,7 @@ app.use("/api", devSessionRoutes);
 app.use("/api", devSessionProxyRoutes);
 app.use("/api", taskRoutes);
 app.use("/api", repoWorkspaceRoutes);
+app.use("/api", runtimeDatabaseRoutes);
 
 app.use(
     (
